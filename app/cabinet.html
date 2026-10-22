@@ -1,0 +1,243 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Кабинет репетитора</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --paper: #f4efe4;
+      --card: #fffdf8;
+      --ink: #1d1a16;
+      --muted: #6d6458;
+      --line: #e2d8c8;
+      --green: #1f4b3a;
+      --mark: #ffe08a;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: "Segoe UI", sans-serif;
+      background: var(--paper);
+      color: var(--ink);
+    }
+    main {
+      max-width: 820px;
+      margin: 0 auto;
+      padding: 32px 20px 64px;
+    }
+    h1 {
+      font-family: Georgia, "Times New Roman", serif;
+      font-weight: 600;
+      font-size: 40px;
+      margin: 0 0 8px;
+    }
+    p.lead { margin: 0 0 24px; color: var(--muted); line-height: 1.45; }
+    label { display: block; font-size: 14px; margin-bottom: 6px; color: var(--muted); }
+    select, input, button {
+      font: inherit;
+      color: inherit;
+    }
+    select, input {
+      width: 100%;
+      border: 1px solid var(--line);
+      background: white;
+      border-radius: 10px;
+      padding: 12px 14px;
+    }
+    .row { display: flex; gap: 8px; }
+    .row input { flex: 1; }
+    button {
+      border: 0;
+      background: var(--green);
+      color: white;
+      border-radius: 10px;
+      padding: 12px 16px;
+      cursor: pointer;
+    }
+    section { margin-top: 28px; }
+    h2 { font-size: 20px; margin: 0 0 12px; }
+    article {
+      background: var(--card);
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      padding: 14px 16px;
+      margin-bottom: 10px;
+    }
+    article h3 { margin: 0 0 4px; font-size: 18px; }
+    .meta { color: var(--muted); font-size: 13px; margin-bottom: 8px; }
+    .snippet { line-height: 1.5; }
+    mark {
+      background: var(--mark);
+      color: inherit;
+      padding: 0 0.15em;
+      border-radius: 0.2em;
+    }
+    .badge {
+      display: inline-block;
+      margin-top: 8px;
+      font-size: 12px;
+      color: var(--green);
+    }
+    .empty { color: var(--muted); }
+    .error { color: #8d2d2d; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Кабинет ученика</h1>
+    <p class="lead">Та же база, что у бота в MAX. Цветная подсветка поиска живёт здесь: чат умеет только жирный шрифт. Когда появится Mini App, в настройки бота вставляется адрес этой страницы.</p>
+    <label for="user">Ученик</label>
+    <select id="user"></select>
+    <section>
+      <h2>Поиск по конспектам</h2>
+      <form id="search-form" class="row">
+        <input id="query" type="search" placeholder="Слово или фраза" autocomplete="off">
+        <button type="submit">Найти</button>
+      </form>
+      <div id="results"></div>
+    </section>
+    <section>
+      <h2>Мои конспекты</h2>
+      <div id="notes"></div>
+    </section>
+    <section>
+      <h2>Банк ошибок</h2>
+      <div id="errors"></div>
+    </section>
+  </main>
+  <script>
+    const userSelect = document.querySelector("#user");
+    const notesBox = document.querySelector("#notes");
+    const errorsBox = document.querySelector("#errors");
+    const resultsBox = document.querySelector("#results");
+    const queryInput = document.querySelector("#query");
+
+    function escapeHtml(value) {
+      return String(value ?? "").replace(/[&<>]/g, (char) => ({
+        "&": "&amp;",
+        "<": "&lt;",
+        ">": "&gt;"
+      })[char]);
+    }
+
+    function highlight(value, query) {
+      let html = escapeHtml(value);
+      const words = String(query || "").trim().split(/\s+/).filter(Boolean);
+      words.forEach((word) => {
+        const pattern = new RegExp(word.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "gi");
+        html = html.replace(pattern, (match) => "<mark>" + match + "</mark>");
+      });
+      return html;
+    }
+
+    function selectedUser() {
+      return userSelect.value;
+    }
+
+    async function loadUsers() {
+      const response = await fetch("/api/users");
+      const users = await response.json();
+      userSelect.innerHTML = "";
+      if (!users.length) {
+        const option = document.createElement("option");
+        option.textContent = "Пока нет учеников — напишите боту";
+        option.value = "";
+        userSelect.append(option);
+        notesBox.innerHTML = '<p class="empty">Конспекты появятся после кнопки «В конспект» в чате.</p>';
+        errorsBox.innerHTML = '<p class="empty">Ошибки появятся после проверки решения.</p>';
+        return;
+      }
+      users.forEach((user) => {
+        const option = document.createElement("option");
+        option.value = user.user_id;
+        option.textContent = (user.first_name || "Ученик") + " · " + user.user_id;
+        userSelect.append(option);
+      });
+      await loadCabinet();
+    }
+
+    async function loadCabinet() {
+      const userId = selectedUser();
+      if (!userId) return;
+      const [notesResponse, errorsResponse] = await Promise.all([
+        fetch("/api/notes?user_id=" + encodeURIComponent(userId)),
+        fetch("/api/errors?user_id=" + encodeURIComponent(userId))
+      ]);
+      const notesPayload = await notesResponse.json();
+      const errors = await errorsResponse.json();
+      renderNotes(notesPayload.notes || []);
+      renderErrors(errors || []);
+    }
+
+    function renderNotes(notes) {
+      if (!notes.length) {
+        notesBox.innerHTML = '<p class="empty">Сохранённых конспектов нет.</p>';
+        return;
+      }
+      notesBox.innerHTML = notes.map((note) => `
+        <article>
+          <h3>${escapeHtml(note.title)}</h3>
+          <div class="meta">${escapeHtml(note.subject || "без предмета")}</div>
+          <div class="snippet">${highlight(note.body.slice(0, 280), queryInput.value)}</div>
+        </article>
+      `).join("");
+    }
+
+    function renderErrors(errors) {
+      if (!errors.length) {
+        errorsBox.innerHTML = '<p class="empty">Банк ошибок пуст.</p>';
+        return;
+      }
+      errorsBox.innerHTML = errors.map((item) => `
+        <article>
+          <h3>${escapeHtml(item.mistake)}</h3>
+          <div class="meta">${escapeHtml(item.subject || "предмет не указан")}</div>
+          <div class="snippet">${escapeHtml(item.problem)}</div>
+        </article>
+      `).join("");
+    }
+
+    function renderResults(hits, query) {
+      if (!query.trim()) {
+        resultsBox.innerHTML = "";
+        return;
+      }
+      if (!hits.length) {
+        resultsBox.innerHTML = '<p class="empty">Ничего не нашлось.</p>';
+        return;
+      }
+      resultsBox.innerHTML = hits.map((hit) => `
+        <article>
+          <h3>${highlight(hit.title, query)}</h3>
+          <div class="meta">${escapeHtml(hit.subject || "без предмета")}</div>
+          <div class="snippet">${highlight(hit.snippet, query)}</div>
+          ${hit.semantic ? '<div class="badge">Совпадение по смыслу</div>' : ""}
+        </article>
+      `).join("");
+    }
+
+    document.querySelector("#search-form").addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const userId = selectedUser();
+      const query = queryInput.value;
+      if (!userId) return;
+      const response = await fetch(
+        "/api/search?user_id=" + encodeURIComponent(userId) + "&q=" + encodeURIComponent(query)
+      );
+      if (!response.ok) {
+        resultsBox.innerHTML = '<p class="error">Поиск не ответил.</p>';
+        return;
+      }
+      renderResults(await response.json(), query);
+      await loadCabinet();
+    });
+
+    userSelect.addEventListener("change", loadCabinet);
+    loadUsers().catch(() => {
+      notesBox.innerHTML = '<p class="error">Кабинет не смог открыть базу.</p>';
+    });
+  </script>
+</body>
+</html>
