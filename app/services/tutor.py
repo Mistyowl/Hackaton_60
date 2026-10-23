@@ -175,7 +175,11 @@ class Tutor:
                 )
             except Exception as error:
                 last_error = error
-                if index == 0 and "thinking" in str(error).lower():
+                message = str(error).lower()
+                unsupported_thinking = index == 0 and (
+                    "thinking" in message or "invalid_argument" in message
+                )
+                if unsupported_thinking:
                     continue
                 raise
         raise TutorError("Модель не ответила. Попробуйте ещё раз.") from last_error
@@ -236,6 +240,12 @@ class Tutor:
             for item in merged
         ]
 
+    def _with_dossier(self, user_text: str, dossier: str) -> str:
+        cleaned = dossier.strip()
+        if not cleaned:
+            return user_text
+        return user_text + "\n\n" + cleaned
+
     def _to_reply(self, data: _TutorSchema) -> TutorReply:
         reply = data.reply.strip()
         if not reply:
@@ -248,25 +258,28 @@ class Tutor:
             skill=data.skill.strip(),
         )
 
-    async def answer(self, history: list[dict], user_text: str) -> TutorReply:
+    async def answer(self, history: list[dict], user_text: str, dossier: str = "") -> TutorReply:
         data = await self._ask(
             load_prompt("tutor.txt"),
-            self._text_contents(history, user_text),
+            self._text_contents(history, self._with_dossier(user_text, dossier)),
             _TutorSchema,
             0.4,
         )
         return self._to_reply(data)
 
-    async def simplify(self, previous: str) -> TutorReply:
-        contents = self._text_contents([], "Прошлый разбор:\n" + previous[:3000])
+    async def simplify(self, previous: str, dossier: str = "") -> TutorReply:
+        contents = self._text_contents(
+            [],
+            self._with_dossier("Прошлый разбор:\n" + previous[:3000], dossier),
+        )
         data = await self._ask(load_prompt("simplify.txt"), contents, _TutorSchema, 0.4)
         return self._to_reply(data)
 
-    async def similar(self, skill: str, context: str) -> TutorReply:
+    async def similar(self, skill: str, context: str, dossier: str = "") -> TutorReply:
         text = f"Приём: {skill}\nКонтекст:\n{context[:2500]}"
         data = await self._ask(
             load_prompt("similar.txt"),
-            self._text_contents([], text),
+            self._text_contents([], self._with_dossier(text, dossier)),
             _TutorSchema,
             0.7,
         )

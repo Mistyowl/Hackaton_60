@@ -3,7 +3,7 @@ from dataclasses import dataclass
 
 from app.db import Database
 from app.services.tutor import CheckResult, Tutor, TutorReply
-from app.textutil import fts_match, markers_to_html, strip_markers
+from app.textutil import clip, fts_match, markers_to_html, strip_markers
 
 log = logging.getLogger(__name__)
 PAGE_SIZE = 5
@@ -152,3 +152,54 @@ async def search_notes(db: Database, tutor: Tutor, user_id: int, query: str) -> 
             )
         )
     return hits
+
+
+def onboard_step(user: dict) -> str | None:
+    if user.get("grade") is None:
+        return "grade"
+    if user.get("explain_style") not in {"short", "detail"}:
+        return "style"
+    return None
+
+
+def _field(value: str, limit: int) -> str:
+    return clip(" ".join((value or "").split()), limit)
+
+
+async def student_dossier(db: Database, user_id: int, records: bool = True) -> str:
+    user = await db.get_user(user_id)
+    name = (user.get("first_name") or "").strip()
+    grade = user.get("grade")
+    style = {"short": "короче", "detail": "подробнее"}.get(user.get("explain_style") or "")
+    errors = await db.list_errors(user_id, limit=4) if records else []
+    notes = await db.note_cards(user_id, limit=4) if records else []
+    if not name and grade is None and not style and not errors and not notes:
+        return ""
+    lines = ["Данные этого ученика."]
+    profile: list[str] = []
+    if name:
+        profile.append(f"Имя: {name}")
+    if grade is not None:
+        profile.append(f"Класс: {grade}")
+    if style:
+        profile.append(f"Формат: {style}")
+    if profile:
+        lines.append(". ".join(profile) + ".")
+    if errors:
+        lines.append("Ошибки:")
+        for index, item in enumerate(errors, start=1):
+            lines.append(
+                f"{index}. {_field(item.get('subject') or '', 40)}. "
+                f"Приём: {_field(item.get('mistake') or '', 80)}. "
+                f"Условие: {_field(item.get('problem') or '', 160)}. "
+                f"Подсказка: {_field(item.get('explanation') or '', 160)}."
+            )
+    if notes:
+        lines.append("Конспекты:")
+        for index, note in enumerate(notes, start=1):
+            lines.append(
+                f"{index}. {_field(note.get('title') or '', 80)}. "
+                f"{_field(note.get('subject') or '', 40)}. "
+                f"{_field(note.get('preview') or '', 120)}."
+            )
+    return clip("\n".join(lines), 1200)

@@ -1,15 +1,22 @@
 import json
+import secrets
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import aiosqlite
 
 from app.textutil import MARK_START, utcnow
 
+CABINET_LINK_MINUTES = 15
+CABINET_SESSION_MINUTES = 45
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS users (
     user_id INTEGER PRIMARY KEY,
     first_name TEXT NOT NULL DEFAULT '',
-    created_at TEXT NOT NULL
+    created_at TEXT NOT NULL,
+    grade INTEGER,
+    explain_style TEXT
 );
 
 CREATE TABLE IF NOT EXISTS sessions (
@@ -116,6 +123,19 @@ CREATE TRIGGER IF NOT EXISTS notes_au AFTER UPDATE ON notes BEGIN
     INSERT INTO notes_fts(rowid, title, body, subject)
     VALUES (new.id, new.title, new.body, new.subject);
 END;
+
+CREATE TABLE IF NOT EXISTS cabinet_links (
+    token TEXT PRIMARY KEY,
+    user_id INTEGER NOT NULL,
+    expires_at TEXT NOT NULL,
+    used_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS cabinet_sessions (
+    token TEXT PRIMARY KEY,
+    user_id INTEGER NOT NULL,
+    expires_at TEXT NOT NULL
+);
 """
 
 
@@ -130,6 +150,7 @@ class Database:
         self._conn.row_factory = aiosqlite.Row
         await self._conn.execute("PRAGMA foreign_keys = ON")
         await self._conn.executescript(SCHEMA)
+        await self._ensure_user_columns()
         await self._conn.commit()
 
     async def close(self) -> None:
@@ -142,6 +163,14 @@ class Database:
         if self._conn is None:
             raise RuntimeError("База ещё не открыта")
         return self._conn
+
+    async def _ensure_user_columns(self) -> None:
+        cursor = await self.conn.execute("PRAGMA table_info(users)")
+        have = {row["name"] for row in await cursor.fetchall()}
+        if "grade" not in have:
+            await self.conn.execute("ALTER TABLE users ADD COLUMN grade INTEGER")
+        if "explain_style" not in have:
+            await self.conn.execute("ALTER TABLE users ADD COLUMN explain_style TEXT")
 
     async def upsert_user(self, user_id: int, first_name: str) -> None:
         now = utcnow()
@@ -166,6 +195,102 @@ class Database:
             (user_id, now),
         )
         await self.conn.commit()
+
+    async def get_user(self, user_id: int) -> dict:
+        cursor = await self.conn.execute(
+            "SELECT user_id, first_name, grade, explain_style FROM users WHERE user_id = ?",
+            (user_id,),
+        )
+        row = await cursor.fetchone()
+        if row is None:
+            await self.upsert_user(user_id, "")
+            cursor = await self.conn.execute(
+                "SELECT user_id, first_name, grade, explain_style FROM users WHERE user_id = ?",
+                (user_id,),
+            )
+            row = await cursor.fetchone()
+        return dict(row)
+
+    async def set_grade(self, user_id: int, grade: int) -> None:
+        await self.conn.execute(
+            "UPDATE users SET grade = ? WHERE user_id = ?",
+            (grade, user_id),
+        )
+        await self.conn.commit()
+
+    async def set_explain_style(self, user_id: int, style: str) -> None:
+        await self.conn.execute(
+            "UPDATE users SET explain_style = ? WHERE user_id = ?",
+            (style, user_id),
+        )
+        await self.conn.commit()
+
+    async def find_user(self, user_id: int) -> dict | None:
+        cursor = await self.conn.execute(
+            "SELECT user_id, first_name, grade, explain_style FROM users WHERE user_id = ?",
+            (user_id,),
+        )
+        row = await cursor.fetchone()
+        return dict(row) if row else None
+
+    async def create_cabinet_link(self, user_id: int) -> str:
+        token = secrets.token_urlsafe(9)
+        await self.conn.execute(
+            """
+            INSERT INTO cabinet_links (token, user_id, expires_at)
+            VALUES (?, ?, ?)
+            """,
+            (token, user_id, _until(CABINET_LINK_MINUTES)),
+        )
+        await self.conn.commit()
+        return token
+
+    async def redeem_cabinet_link(self, token: str) -> str | None:
+        now = utcnow()
+        cursor = await self.conn.execute(
+            """
+            UPDATE cabinet_links
+            SET used_at = ?
+            WHERE token = ? AND used_at IS NULL AND expires_at > ?
+            """,
+            (now, token, now),
+        )
+        if cursor.rowcount != 1:
+            await self.conn.commit()
+            return None
+        found = await self.conn.execute(
+            "SELECT user_id FROM cabinet_links WHERE token = ?",
+            (token,),
+        )
+        row = await found.fetchone()
+        if row is None:
+            await self.conn.rollback()
+            return None
+        session = secrets.token_urlsafe(18)
+        await self.conn.execute(
+            """
+            INSERT INTO cabinet_sessions (token, user_id, expires_at)
+            VALUES (?, ?, ?)
+            """,
+            (session, int(row["user_id"]), _until(CABINET_SESSION_MINUTES)),
+        )
+        await self.conn.commit()
+        return session
+
+    async def cabinet_user(self, token: str) -> dict | None:
+        if not token:
+            return None
+        cursor = await self.conn.execute(
+            """
+            SELECT users.user_id, users.first_name, users.grade, users.explain_style
+            FROM cabinet_sessions
+            JOIN users ON users.user_id = cabinet_sessions.user_id
+            WHERE cabinet_sessions.token = ? AND cabinet_sessions.expires_at > ?
+            """,
+            (token, utcnow()),
+        )
+        row = await cursor.fetchone()
+        return dict(row) if row else None
 
     async def list_users(self) -> list[dict]:
         cursor = await self.conn.execute(
@@ -590,3 +715,7 @@ class Database:
             (now, user_id, quiz_id),
         )
         await self.conn.commit()
+
+
+def _until(minutes: int) -> str:
+    return (datetime.now(timezone.utc) + timedelta(minutes=minutes)).isoformat(timespec="seconds")

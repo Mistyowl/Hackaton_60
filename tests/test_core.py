@@ -5,8 +5,10 @@ from pathlib import Path
 
 from httpx import ASGITransport, AsyncClient
 
+from app.bot.commands import bot_commands
+from app.bot.keyboards import cabinet_link_keyboard, grade_keyboard, menu_keyboard, style_keyboard
 from app.db import Database
-from app.services.notes import register_check, save_manual, search_notes
+from app.services.notes import onboard_step, register_check, save_manual, search_notes, student_dossier
 from app.services.quiz import answer_question
 from app.services.tutor import (
     CheckResult,
@@ -252,7 +254,9 @@ class DatabaseTests(unittest.IsolatedAsyncioTestCase):
         stranger = await answer_question(self.db, 2, returned["id"], 1)
         self.assertTrue(stranger.missing)
 
-    async def test_cabinet_search_highlight_data(self) -> None:
+    async def test_cabinet_link_opens_once_for_one_student(self) -> None:
+        await self.db.set_grade(1, 7)
+        await self.db.set_explain_style(1, "detail")
         await self.db.insert_note(
             1,
             "Комбинаторика",
@@ -260,6 +264,18 @@ class DatabaseTests(unittest.IsolatedAsyncioTestCase):
             "Число перестановок букв слова равно факториалу.",
             "chat",
         )
+        await self.db.insert_note(
+            2,
+            "Секрет Бори",
+            "Физика",
+            "Чужое слово перестановок не должно всплыть.",
+            "chat",
+        )
+        await self.db.insert_error(1, "Алгебра", "Я" * 400, "приём-деления", "СКРЫТЫЙ РАЗБОР")
+        await self.db.insert_error(2, "Физика", "чужая задача", "секрет Бори", "чужой разбор")
+        token = await self.db.create_cabinet_link(1)
+        self.assertGreaterEqual(len(token), 8)
+        self.assertLessEqual(len(token), 16)
         app = create_app(self.db, FakeTutor())
         transport = ASGITransport(app=app)
         async with AsyncClient(transport=transport, base_url="http://cabinet") as client:
@@ -267,14 +283,224 @@ class DatabaseTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(health.status_code, 200)
             page = await client.get("/")
             self.assertIn("<mark>", page.text)
-            found = await client.get("/api/search", params={"user_id": 1, "q": "перестановок"})
+            self.assertIn("Откройте кабинет из чата с ботом", page.text)
+            self.assertNotIn("Боря", page.text)
+            self.assertNotIn("Секрет Бори", page.text)
+            self.assertNotIn("мини-приложен", page.text.lower())
+            self.assertEqual((await client.get("/api/profile")).status_code, 401)
+            self.assertEqual((await client.get("/api/users")).status_code, 404)
+            self.assertEqual(
+                (await client.get("/api/search", params={"user_id": 2, "q": "перестановок"})).status_code,
+                401,
+            )
+            self.assertEqual((await client.get("/api/notes")).status_code, 401)
+            self.assertEqual((await client.get("/api/errors")).status_code, 401)
+
+            first = await client.get(f"/k/{token}", follow_redirects=False)
+            self.assertEqual(first.status_code, 302)
+            self.assertEqual(first.headers["location"], "/")
+            cookie = first.headers["set-cookie"]
+            self.assertIn("cabinet=", cookie)
+            self.assertIn("HttpOnly", cookie)
+            self.assertIn("samesite=lax", cookie.lower())
+            self.assertIn("Path=/", cookie)
+            self.assertIn("Max-Age=2700", cookie)
+
+            profile = await client.get("/api/profile", params={"user_id": 2})
+            self.assertEqual(profile.status_code, 200)
+            body = profile.json()
+            self.assertEqual(body["first_name"], "Аня")
+            self.assertEqual(body["grade"], 7)
+            self.assertEqual(body["explain_style"], "detail")
+            self.assertNotIn("user_id", body)
+            self.assertNotIn("Боря", profile.text)
+
+            found = await client.get("/api/search", params={"q": "перестановок", "user_id": 2})
             self.assertEqual(found.status_code, 200)
             payload = found.json()
-            self.assertEqual(payload[0]["title"], "Комбинаторика")
+            self.assertEqual([item["title"] for item in payload], ["Комбинаторика"])
             self.assertIn("перестановок", payload[0]["snippet"])
             self.assertFalse(payload[0]["semantic"])
-            hidden = await client.get("/api/notes", params={"user_id": 2})
-            self.assertEqual(hidden.json()["total"], 0)
+            self.assertNotIn("Секрет", found.text)
+            self.assertEqual((await client.get("/api/search", params={"q": "  "})).json(), [])
+
+            notes = await client.get("/api/notes", params={"user_id": 2})
+            self.assertEqual(notes.json()["total"], 1)
+            self.assertNotIn("Секрет", notes.text)
+            self.assertNotIn("body", notes.json()["notes"][0])
+            detail = await client.get(f"/api/notes/{notes.json()['notes'][0]['id']}")
+            self.assertIn("факториалу", detail.json()["body"])
+            foreign = await self.db.insert_note(2, "Ещё секрет", "Физика", "скрыто", "chat")
+            self.assertEqual((await client.get(f"/api/notes/{foreign}")).status_code, 404)
+
+            mistakes = await client.get("/api/errors", params={"user_id": 2})
+            self.assertEqual(mistakes.status_code, 200)
+            error_rows = mistakes.json()
+            self.assertEqual([item["mistake"] for item in error_rows], ["приём-деления"])
+            self.assertNotIn("explanation", error_rows[0])
+            self.assertNotIn("СКРЫТЫЙ РАЗБОР", mistakes.text)
+            self.assertNotIn("секрет Бори", mistakes.text)
+            self.assertLessEqual(len(error_rows[0]["problem"]), 180)
+
+        async with AsyncClient(transport=transport, base_url="http://cabinet") as replay:
+            second = await replay.get(f"/k/{token}", follow_redirects=False)
+            self.assertEqual(second.status_code, 200)
+            self.assertIn("Ссылка уже не действует", second.text)
+            self.assertNotIn("set-cookie", {key.lower() for key in second.headers})
+            self.assertEqual((await replay.get("/api/profile")).status_code, 401)
+            self.assertNotIn("Боря", second.text)
+            self.assertNotIn("Аня", second.text)
+
+        expired = await self.db.create_cabinet_link(1)
+        await self.db.conn.execute(
+            "UPDATE cabinet_links SET expires_at = ? WHERE token = ?",
+            ("2000-01-01T00:00:00+00:00", expired),
+        )
+        await self.db.conn.commit()
+        async with AsyncClient(transport=transport, base_url="http://cabinet") as stale:
+            opened = await stale.get(f"/k/{expired}", follow_redirects=False)
+            self.assertEqual(opened.status_code, 200)
+            self.assertIn("Ссылка уже не действует", opened.text)
+            self.assertNotIn("set-cookie", {key.lower() for key in opened.headers})
+            self.assertEqual((await stale.get("/api/profile")).status_code, 401)
+
+        await self.db.conn.execute(
+            """
+            INSERT INTO cabinet_links (token, user_id, expires_at)
+            VALUES (?, ?, ?)
+            """,
+            ("ghost-link-token", 99, "2999-01-01T00:00:00+00:00"),
+        )
+        await self.db.conn.commit()
+        async with AsyncClient(transport=transport, base_url="http://cabinet") as ghost:
+            opened = await ghost.get("/k/ghost-link-token", follow_redirects=False)
+            self.assertEqual(opened.status_code, 302)
+            self.assertEqual((await ghost.get("/api/profile")).status_code, 401)
+        self.assertIsNone(await self.db.find_user(99))
+
+    async def test_cabinet_delete_belongs_to_the_session(self) -> None:
+        own = await self.db.insert_note(1, "Свой конспект", "Математика", "только Аня", "manual")
+        kept = await self.db.insert_note(1, "Второй конспект", "Математика", "тоже Аня", "manual")
+        foreign = await self.db.insert_note(2, "Чужой конспект", "Физика", "только Боря", "manual")
+        app = create_app(self.db, FakeTutor())
+        transport = ASGITransport(app=app)
+        anya = await self.db.create_cabinet_link(1)
+        borya = await self.db.create_cabinet_link(2)
+        async with AsyncClient(transport=transport, base_url="http://cabinet") as anon:
+            page = await anon.get("/")
+            self.assertIn("Удалить", page.text)
+            self.assertEqual((await anon.delete(f"/api/notes/{own}")).status_code, 401)
+            self.assertIsNotNone(await self.db.get_note(1, own))
+        async with AsyncClient(transport=transport, base_url="http://cabinet") as owner:
+            opened = await owner.get(f"/k/{anya}", follow_redirects=False)
+            self.assertEqual(opened.status_code, 302)
+            missed = await owner.delete(f"/api/notes/{foreign}")
+            self.assertEqual(missed.status_code, 404)
+            self.assertIsNotNone(await self.db.get_note(2, foreign))
+            removed = await owner.delete(f"/api/notes/{own}")
+            self.assertEqual(removed.status_code, 200)
+            self.assertTrue(removed.json()["deleted"])
+            self.assertIsNone(await self.db.get_note(1, own))
+        async with AsyncClient(transport=transport, base_url="http://cabinet") as stranger:
+            await stranger.get(f"/k/{borya}", follow_redirects=False)
+            blocked = await stranger.delete(f"/api/notes/{kept}")
+            self.assertEqual(blocked.status_code, 404)
+            self.assertIsNotNone(await self.db.get_note(1, kept))
+
+    async def test_dossier_uses_only_this_student(self) -> None:
+        await self.db.upsert_user(3, "")
+        self.assertEqual(await student_dossier(self.db, 3), "")
+        long_problem = "Я" * 400
+        await self.db.set_grade(1, 7)
+        await self.db.set_explain_style(1, "detail")
+        await self.db.insert_error(1, "Алгебра", long_problem, "приём-деления", "короткая подсказка")
+        await self.db.insert_error(2, "Физика", "чужая задача", "секрет Бори", "чужая подсказка")
+        await self.db.insert_note(1, "Свой конспект Ани", "Геометрия", "Начало конспекта.", "manual")
+        await register_check(
+            self.db,
+            1,
+            CheckResult(
+                is_schoolwork=True,
+                subject="Алгебра",
+                problem_text="2x = 4",
+                student_solution_text="x = 4",
+                is_correct=False,
+                error_step="не разделил",
+                hint="Раздели на коэффициент.",
+                full_explanation="СЕКРЕТНЫЙ ПОЛНЫЙ РАЗБОР",
+                skill="линейное уравнение",
+                praise="",
+            ),
+        )
+        voice = await student_dossier(self.db, 1, records=False)
+        self.assertIn("Аня", voice)
+        self.assertIn("Класс: 7", voice)
+        self.assertNotIn("приём-деления", voice)
+        self.assertNotIn("Свой конспект Ани", voice)
+        text = await student_dossier(self.db, 1)
+        self.assertIn("Аня", text)
+        self.assertIn("Класс: 7", text)
+        self.assertIn("подробнее", text)
+        self.assertIn("приём-деления", text)
+        self.assertIn("Свой конспект Ани", text)
+        self.assertIn("Раздели на коэффициент.", text)
+        self.assertNotIn("секрет Бори", text)
+        self.assertNotIn("СЕКРЕТНЫЙ ПОЛНЫЙ РАЗБОР", text)
+        self.assertNotIn(long_problem, text)
+        self.assertLessEqual(len(text), 1200)
+        other = await student_dossier(self.db, 2)
+        self.assertIn("секрет Бори", other)
+        self.assertNotIn("приём-деления", other)
+
+    async def test_menu_waits_until_style_is_chosen(self) -> None:
+        user = await self.db.get_user(1)
+        self.assertEqual(onboard_step(user), "grade")
+        await self.db.set_mode(1, "onboard_grade")
+        await self.db.set_grade(1, 6)
+        self.assertEqual((await self.db.get_session(1))["mode"], "onboard_grade")
+        self.assertEqual(onboard_step(await self.db.get_user(1)), "style")
+        grade_payloads = [
+            button.payload
+            for row in grade_keyboard().payload.buttons
+            for button in row
+        ]
+        style_payloads = [
+            button.payload
+            for row in style_keyboard().payload.buttons
+            for button in row
+        ]
+        self.assertEqual(grade_payloads, [f"grade:{number}" for number in range(1, 12)])
+        self.assertEqual(style_payloads, ["style:short", "style:detail"])
+        self.assertNotIn("menu:home", grade_payloads + style_payloads)
+        menu_payloads = [
+            button.payload for row in menu_keyboard().payload.buttons for button in row
+        ]
+        self.assertIn("menu:ask", menu_payloads)
+        self.assertIn("menu:search", menu_payloads)
+        self.assertIn("menu:notes", menu_payloads)
+        self.assertNotIn("menu:cabinet", menu_payloads)
+        with_cabinet = [
+            button.payload for row in menu_keyboard(True).payload.buttons for button in row
+        ]
+        self.assertIn("menu:cabinet", with_cabinet)
+        self.assertIn("menu:ask", with_cabinet)
+        self.assertIn("menu:own", with_cabinet)
+        self.assertNotIn("menu:search", with_cabinet)
+        self.assertNotIn("menu:notes", with_cabinet)
+        published = [command.name for command in bot_commands()]
+        self.assertIn("notes", published)
+        self.assertIn("search", published)
+        hidden = [command.name for command in bot_commands(True)]
+        self.assertNotIn("notes", hidden)
+        self.assertNotIn("search", hidden)
+        self.assertIn("quiz", hidden)
+        self.assertIn("check", hidden)
+        link = cabinet_link_keyboard("http://127.0.0.1:8000/k/abc")
+        opener = link.payload.buttons[0][0]
+        self.assertEqual(opener.text, "Открыть")
+        self.assertEqual(opener.url, "http://127.0.0.1:8000/k/abc")
+        await self.db.set_explain_style(1, "short")
+        self.assertIsNone(onboard_step(await self.db.get_user(1)))
 
 
 if __name__ == "__main__":

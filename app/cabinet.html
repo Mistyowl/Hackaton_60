@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Кабинет репетитора</title>
+  <title>Кабинет</title>
   <style>
     :root {
       color-scheme: light;
@@ -23,23 +23,20 @@
       color: var(--ink);
     }
     main {
-      max-width: 820px;
+      max-width: 440px;
       margin: 0 auto;
-      padding: 32px 20px 64px;
+      padding: 28px 18px 64px;
     }
     h1 {
       font-family: Georgia, "Times New Roman", serif;
       font-weight: 600;
-      font-size: 40px;
+      font-size: 36px;
       margin: 0 0 8px;
     }
-    p.lead { margin: 0 0 24px; color: var(--muted); line-height: 1.45; }
+    p.lead { margin: 0; color: var(--muted); line-height: 1.45; }
     label { display: block; font-size: 14px; margin-bottom: 6px; color: var(--muted); }
-    select, input, button {
-      font: inherit;
-      color: inherit;
-    }
-    select, input {
+    input, button { font: inherit; color: inherit; }
+    input {
       width: 100%;
       border: 1px solid var(--line);
       background: white;
@@ -47,7 +44,7 @@
       padding: 12px 14px;
     }
     .row { display: flex; gap: 8px; }
-    .row input { flex: 1; }
+    .row input { flex: 1; min-width: 0; }
     button {
       border: 0;
       background: var(--green);
@@ -55,6 +52,13 @@
       border-radius: 10px;
       padding: 12px 16px;
       cursor: pointer;
+    }
+    button.delete {
+      margin-top: 12px;
+      background: transparent;
+      color: var(--green);
+      border: 1px solid var(--line);
+      padding: 8px 12px;
     }
     section { margin-top: 28px; }
     h2 { font-size: 20px; margin: 0 0 12px; }
@@ -65,9 +69,10 @@
       padding: 14px 16px;
       margin-bottom: 10px;
     }
+    article.note { cursor: pointer; }
     article h3 { margin: 0 0 4px; font-size: 18px; }
     .meta { color: var(--muted); font-size: 13px; margin-bottom: 8px; }
-    .snippet { line-height: 1.5; }
+    .snippet { line-height: 1.5; white-space: pre-wrap; }
     mark {
       background: var(--mark);
       color: inherit;
@@ -82,37 +87,45 @@
     }
     .empty { color: var(--muted); }
     .error { color: #8d2d2d; }
+    #who { margin: 0 0 4px; }
   </style>
 </head>
 <body>
   <main>
-    <h1>Кабинет ученика</h1>
-    <p class="lead">Та же база, что у бота в MAX. Цветная подсветка поиска живёт здесь: чат умеет только жирный шрифт. Когда появится Mini App, в настройки бота вставляется адрес этой страницы.</p>
-    <label for="user">Ученик</label>
-    <select id="user"></select>
-    <section>
-      <h2>Поиск по конспектам</h2>
-      <form id="search-form" class="row">
-        <input id="query" type="search" placeholder="Слово или фраза" autocomplete="off">
-        <button type="submit">Найти</button>
-      </form>
-      <div id="results"></div>
-    </section>
-    <section>
-      <h2>Мои конспекты</h2>
-      <div id="notes"></div>
-    </section>
-    <section>
-      <h2>Банк ошибок</h2>
-      <div id="errors"></div>
-    </section>
+    <h1>Кабинет</h1>
+    <p id="who" class="lead" hidden></p>
+    <p id="gate" class="lead">Откройте кабинет из чата с ботом.</p>
+    <div id="cabinet" hidden>
+      <section>
+        <h2>Поиск</h2>
+        <form id="search-form" class="row">
+          <input id="query" type="search" placeholder="Слово или фраза" autocomplete="off">
+          <button type="submit">Найти</button>
+        </form>
+        <div id="results"></div>
+      </section>
+      <section>
+        <h2>Конспекты</h2>
+        <div id="notes"></div>
+      </section>
+      <section>
+        <h2>Ошибки</h2>
+        <div id="errors"></div>
+      </section>
+    </div>
   </main>
   <script>
-    const userSelect = document.querySelector("#user");
+    const LOCKED = "Откройте кабинет из чата с ботом.";
+    const BURNED = "Ссылка уже не действует. Нажмите «Кабинет» в чате ещё раз.";
     const notesBox = document.querySelector("#notes");
     const errorsBox = document.querySelector("#errors");
     const resultsBox = document.querySelector("#results");
     const queryInput = document.querySelector("#query");
+    const gate = document.querySelector("#gate");
+    const cabinet = document.querySelector("#cabinet");
+    const who = document.querySelector("#who");
+    const previews = new Map();
+    const opened = new Map();
 
     function escapeHtml(value) {
       return String(value ?? "").replace(/[&<>]/g, (char) => ({
@@ -132,69 +145,58 @@
       return html;
     }
 
-    function selectedUser() {
-      return userSelect.value;
+    function showGate(text) {
+      cabinet.hidden = true;
+      who.hidden = true;
+      gate.hidden = false;
+      gate.textContent = text;
     }
 
-    async function loadUsers() {
-      const response = await fetch("/api/users");
-      const users = await response.json();
-      userSelect.innerHTML = "";
-      if (!users.length) {
-        const option = document.createElement("option");
-        option.textContent = "Пока нет учеников — напишите боту";
-        option.value = "";
-        userSelect.append(option);
-        notesBox.innerHTML = '<p class="empty">Конспекты появятся после кнопки «В конспект» в чате.</p>';
-        errorsBox.innerHTML = '<p class="empty">Ошибки появятся после проверки решения.</p>';
-        return;
-      }
-      users.forEach((user) => {
-        const option = document.createElement("option");
-        option.value = user.user_id;
-        option.textContent = (user.first_name || "Ученик") + " · " + user.user_id;
-        userSelect.append(option);
-      });
-      await loadCabinet();
+    function showCabinet() {
+      gate.hidden = true;
+      cabinet.hidden = false;
     }
 
-    async function loadCabinet() {
-      const userId = selectedUser();
-      if (!userId) return;
-      const [notesResponse, errorsResponse] = await Promise.all([
-        fetch("/api/notes?user_id=" + encodeURIComponent(userId)),
-        fetch("/api/errors?user_id=" + encodeURIComponent(userId))
-      ]);
-      const notesPayload = await notesResponse.json();
-      const errors = await errorsResponse.json();
-      renderNotes(notesPayload.notes || []);
-      renderErrors(errors || []);
+    function renderProfile(profile) {
+      const parts = [];
+      const name = String(profile.first_name || "").trim();
+      if (name) parts.push(name);
+      if (profile.grade != null) parts.push(profile.grade + " класс");
+      const style = { short: "короче", detail: "подробнее" }[profile.explain_style];
+      if (style) parts.push(style);
+      who.textContent = parts.join(" · ");
+      who.hidden = parts.length === 0;
     }
 
     function renderNotes(notes) {
+      previews.clear();
+      opened.clear();
       if (!notes.length) {
-        notesBox.innerHTML = '<p class="empty">Сохранённых конспектов нет.</p>';
+        notesBox.innerHTML = '<p class="empty">Конспекты появятся, когда в чате нажмёте «В конспект».</p>';
         return;
       }
-      notesBox.innerHTML = notes.map((note) => `
-        <article>
-          <h3>${escapeHtml(note.title)}</h3>
-          <div class="meta">${escapeHtml(note.subject || "без предмета")}</div>
-          <div class="snippet">${highlight(note.body.slice(0, 280), queryInput.value)}</div>
-        </article>
-      `).join("");
+      notesBox.innerHTML = notes.map((note) => {
+        previews.set(String(note.id), note.preview || "");
+        return `
+          <article class="note" data-id="${escapeHtml(note.id)}">
+            <h3>${escapeHtml(note.title)}</h3>
+            <div class="meta">${escapeHtml(note.subject || "без предмета")}</div>
+            <div class="snippet">${highlight(note.preview || "", queryInput.value)}</div>
+          </article>
+        `;
+      }).join("");
     }
 
     function renderErrors(errors) {
       if (!errors.length) {
-        errorsBox.innerHTML = '<p class="empty">Банк ошибок пуст.</p>';
+        errorsBox.innerHTML = '<p class="empty">Ошибки появятся после проверки решения с ошибкой.</p>';
         return;
       }
       errorsBox.innerHTML = errors.map((item) => `
         <article>
           <h3>${escapeHtml(item.mistake)}</h3>
           <div class="meta">${escapeHtml(item.subject || "предмет не указан")}</div>
-          <div class="snippet">${escapeHtml(item.problem)}</div>
+          <div class="snippet">${escapeHtml(item.problem || "")}</div>
         </article>
       `).join("");
     }
@@ -218,26 +220,121 @@
       `).join("");
     }
 
+    async function loadCabinet() {
+      const profileResponse = await fetch("/api/profile");
+      if (profileResponse.status === 401) {
+        showGate(LOCKED);
+        return;
+      }
+      if (!profileResponse.ok) {
+        showGate("Кабинет не смог открыть базу.");
+        return;
+      }
+      renderProfile(await profileResponse.json());
+      const [notesResponse, errorsResponse] = await Promise.all([
+        fetch("/api/notes"),
+        fetch("/api/errors")
+      ]);
+      if (notesResponse.status === 401 || errorsResponse.status === 401) {
+        showGate(LOCKED);
+        return;
+      }
+      if (!notesResponse.ok || !errorsResponse.ok) {
+        showGate("Кабинет не смог открыть базу.");
+        return;
+      }
+      const notesPayload = await notesResponse.json();
+      renderNotes(notesPayload.notes || []);
+      renderErrors(await errorsResponse.json());
+      showCabinet();
+    }
+
     document.querySelector("#search-form").addEventListener("submit", async (event) => {
       event.preventDefault();
-      const userId = selectedUser();
       const query = queryInput.value;
-      if (!userId) return;
-      const response = await fetch(
-        "/api/search?user_id=" + encodeURIComponent(userId) + "&q=" + encodeURIComponent(query)
-      );
+      if (!query.trim()) {
+        renderResults([], query);
+        return;
+      }
+      const response = await fetch("/api/search?q=" + encodeURIComponent(query));
+      if (response.status === 401) {
+        showGate(LOCKED);
+        return;
+      }
       if (!response.ok) {
         resultsBox.innerHTML = '<p class="error">Поиск не ответил.</p>';
         return;
       }
       renderResults(await response.json(), query);
-      await loadCabinet();
+      renderNotesFromCache();
     });
 
-    userSelect.addEventListener("change", loadCabinet);
-    loadUsers().catch(() => {
-      notesBox.innerHTML = '<p class="error">Кабинет не смог открыть базу.</p>';
+    function renderNotesFromCache() {
+      notesBox.querySelectorAll("article.note").forEach((article) => {
+        const id = article.dataset.id;
+        const snippet = article.querySelector(".snippet");
+        const text = opened.get(id) || previews.get(id) || "";
+        snippet.innerHTML = highlight(text, queryInput.value);
+      });
+    }
+
+    function showDelete(article) {
+      if (article.querySelector("button.delete")) return;
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "delete";
+      button.textContent = "Удалить";
+      article.append(button);
+    }
+
+    async function deleteNote(article) {
+      const id = article.dataset.id;
+      const response = await fetch("/api/notes/" + encodeURIComponent(id), { method: "DELETE" });
+      if (response.status === 401) {
+        showGate(LOCKED);
+        return;
+      }
+      if (!response.ok) return;
+      previews.delete(id);
+      opened.delete(id);
+      article.remove();
+      if (!notesBox.querySelector("article.note")) {
+        notesBox.innerHTML = '<p class="empty">Конспекты появятся, когда в чате нажмёте «В конспект».</p>';
+      }
+    }
+
+    notesBox.addEventListener("click", async (event) => {
+      const article = event.target.closest("article.note");
+      if (!article) return;
+      if (event.target.closest("button.delete")) {
+        await deleteNote(article);
+        return;
+      }
+      const id = article.dataset.id;
+      const snippet = article.querySelector(".snippet");
+      if (opened.has(id)) {
+        opened.delete(id);
+        article.querySelector("button.delete")?.remove();
+        snippet.innerHTML = highlight(previews.get(id) || "", queryInput.value);
+        return;
+      }
+      const response = await fetch("/api/notes/" + encodeURIComponent(id));
+      if (response.status === 401) {
+        showGate(LOCKED);
+        return;
+      }
+      if (!response.ok) return;
+      const note = await response.json();
+      opened.set(id, note.body || "");
+      snippet.innerHTML = highlight(note.body || "", queryInput.value);
+      showDelete(article);
     });
+
+    if (location.pathname.startsWith("/k/")) {
+      showGate(BURNED);
+    } else {
+      loadCabinet().catch(() => showGate("Кабинет не смог открыть базу."));
+    }
   </script>
 </body>
 </html>

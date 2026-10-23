@@ -5,6 +5,15 @@ from app.services.quiz import AnswerView, question_options
 from app.services.tutor import CheckResult
 from app.textutil import LETTERS, esc, format_elapsed, format_stamp
 
+GRADE_PROMPT = "В каком вы классе? Нажмите цифру от 1 до 11."
+
+GRADE_NUDGE = "Нажмите класс кнопкой, цифрой от 1 до 11."
+
+STYLE_PROMPT = (
+    "Как объяснять? «Короче» — короткими фразами. "
+    "«Подробнее» — чуть длиннее и с примером, без готового ответа."
+)
+
 WELCOME = (
     "Я школьный репетитор. Разберу вопрос, проверю решение по фото, "
     "сохраню конспект и соберу квиз по ошибкам — пока каждый ответ не станет верным.\n\n"

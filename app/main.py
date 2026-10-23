@@ -5,6 +5,7 @@ import uvicorn
 from maxapi import Bot, Dispatcher
 from maxapi.enums.parse_mode import ParseMode
 
+from app.bot.commands import bot_commands
 from app.bot.handlers import BotApp
 from app.config import get_settings
 from app.db import Database
@@ -14,15 +15,22 @@ from app.web import create_app
 log = logging.getLogger(__name__)
 
 
-async def run_bot(token: str, db: Database, tutor: Tutor) -> None:
+async def run_bot(token: str, db: Database, tutor: Tutor, cabinet_url: str) -> None:
     bot = Bot(token=token, parse_mode=ParseMode.HTML)
     dispatcher = Dispatcher()
-    BotApp(bot, db, tutor).register(dispatcher)
+    BotApp(bot, db, tutor, cabinet_url).register(dispatcher)
     try:
         await bot.delete_webhook()
     except Exception:
         log.warning(
             "Не удалось снять webhook. Если polling молчит, удалите подписку в кабинете MAX.",
+            exc_info=True,
+        )
+    try:
+        await bot.set_commands(*bot_commands(bool(cabinet_url.strip())))
+    except Exception:
+        log.warning(
+            "Не удалось опубликовать меню команд. Останется список с прошлого запуска.",
             exc_info=True,
         )
     log.info("Бот слушает MAX через long polling")
@@ -55,7 +63,7 @@ async def amain() -> None:
             group.create_task(server.serve())
             token = settings.max_bot_token.strip()
             if token:
-                group.create_task(run_bot(token, db, tutor))
+                group.create_task(run_bot(token, db, tutor, settings.cabinet_url))
             else:
                 log.warning("MAX_BOT_TOKEN пуст: бот не запущен, открыт только кабинет.")
     finally:

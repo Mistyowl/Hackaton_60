@@ -1,26 +1,34 @@
 import logging
+from pathlib import Path
 
 from maxapi.enums.attachment import AttachmentType
 from maxapi.enums.parse_mode import ParseMode
-from maxapi.types import BotStarted, MessageCallback, MessageCreated
+from maxapi.types import BotStarted, InputMedia, MessageCallback, MessageCreated
 
 from app.bot.keyboards import (
+    back_keyboard,
+    cabinet_link_keyboard,
     check_keyboard,
+    grade_keyboard,
     menu_keyboard,
     note_keyboard,
     notes_keyboard,
     quiz_keyboard,
     saved_keyboard,
     search_keyboard,
+    style_keyboard,
     tutor_keyboard,
 )
 from app.bot.render import (
     ASK_PROMPT,
     CHECK_PROMPT,
     EMPTY_ERRORS,
+    GRADE_NUDGE,
+    GRADE_PROMPT,
     OWN_PROMPT,
     QUIZ_PROMPT,
     SEARCH_PROMPT,
+    STYLE_PROMPT,
     WELCOME,
     option_count,
     render_check,
@@ -31,20 +39,34 @@ from app.bot.render import (
     render_question,
     render_search,
 )
-from app.db import Database
-from app.services.notes import PAGE_SIZE, register_check, save_check, save_manual, save_reply, search_notes
+from app.db import CABINET_LINK_MINUTES, Database
+from app.services.notes import (
+    PAGE_SIZE,
+    onboard_step,
+    register_check,
+    save_check,
+    save_manual,
+    save_reply,
+    search_notes,
+    student_dossier,
+)
 from app.services.quiz import answer_question, ensure_topic, start_error_quiz, start_topic_quiz
 from app.services.tutor import Tutor, TutorError, TutorReply
 from app.textutil import check_prefix, clip, esc, image_mime, parse_command
 
 log = logging.getLogger(__name__)
+LUMI_IMAGE = InputMedia(str(Path(__file__).resolve().parent.parent / "assets" / "lumi.jpg"))
 
 
 class BotApp:
-    def __init__(self, bot, db: Database, tutor: Tutor) -> None:
+    def __init__(self, bot, db: Database, tutor: Tutor, cabinet_url: str = "") -> None:
         self.bot = bot
         self.db = db
         self.tutor = tutor
+        self.cabinet_url = cabinet_url.strip().rstrip("/")
+
+    def _menu(self):
+        return menu_keyboard(bool(self.cabinet_url))
 
     def register(self, dp) -> None:
         dp.bot_started()(self.on_started)
@@ -56,8 +78,12 @@ class BotApp:
         if user is None:
             return
         await self.db.upsert_user(user.user_id, user.first_name or "")
+        step = await self._onboard_step(user.user_id)
+        if step:
+            await self._send_onboarding(event.chat_id, user.user_id, step)
+            return
         await self.db.set_mode(user.user_id, "chat")
-        await self.send(event.chat_id, user.user_id, WELCOME, menu_keyboard())
+        await self.send(event.chat_id, user.user_id, WELCOME, self._menu())
 
     async def on_message(self, event: MessageCreated) -> None:
         try:
@@ -66,11 +92,15 @@ class BotApp:
             log.exception("message handler failed")
             chat_id, user_id, _ = self._person(event)
             if user_id is not None:
+                step = await self._onboard_step(user_id)
+                if step:
+                    await self._send_onboarding(chat_id, user_id, step, nudge=True)
+                    return
                 await self.send(
                     chat_id,
                     user_id,
                     "Не получилось обработать сообщение. Попробуйте ещё раз.",
-                    menu_keyboard(),
+                    self._menu(),
                 )
 
     async def on_callback(self, event: MessageCallback) -> None:
@@ -82,11 +112,15 @@ class BotApp:
             await self._notify(event, "Не получилось выполнить действие")
             if user_id:
                 chat_id, _ = event.get_ids()
+                step = await self._onboard_step(user_id)
+                if step:
+                    await self._send_onboarding(chat_id, user_id, step, nudge=True)
+                    return
                 await self.send(
                     chat_id,
                     user_id,
                     "Не получилось выполнить действие. Откройте меню и попробуйте ещё раз.",
-                    menu_keyboard(),
+                    self._menu(),
                 )
 
     async def _on_message(self, event: MessageCreated) -> None:
@@ -97,20 +131,25 @@ class BotApp:
         body = event.message.body
         text = (body.text or "").strip() if body else ""
         image_url = self._image_url(event)
-        if image_url and not parse_command(text):
+        command = parse_command(text) if text else None
+        if command is not None:
+            await self._handle_command(chat_id, user_id, command[0], command[1])
+            return
+        step = await self._onboard_step(user_id)
+        if step:
+            if text or image_url:
+                await self._send_onboarding(chat_id, user_id, step, nudge=True)
+            return
+        if image_url:
             await self._handle_photo(chat_id, user_id, image_url, text)
             return
         if not text:
-            return
-        command = parse_command(text)
-        if command is not None:
-            await self._handle_command(chat_id, user_id, command[0], command[1])
             return
         prefixed = check_prefix(text)
         if prefixed is not None:
             await self.db.set_mode(user_id, "chat")
             if not prefixed:
-                await self.send(chat_id, user_id, "После «проверь» напишите решение.", menu_keyboard())
+                await self.send(chat_id, user_id, "После «проверь» напишите решение.", back_keyboard())
                 return
             await self._handle_check_text(chat_id, user_id, prefixed)
             return
@@ -143,35 +182,54 @@ class BotApp:
             name = event.callback.user.first_name or ""
         await self.db.upsert_user(user_id, name)
         payload = event.callback.payload or ""
+        step = await self._onboard_step(user_id)
+        if payload.startswith("grade:") and step == "grade":
+            await self._accept_grade(event, user_id, _payload_int(payload, 1))
+            return
+        if payload.startswith("style:") and step == "style":
+            await self._accept_style(event, user_id, payload.split(":", 1)[1])
+            return
+        if step:
+            await self._show_onboarding(event, user_id, step)
+            return
         if payload == "menu:home":
             await self.db.set_mode(user_id, "chat")
-            await self.show(event, WELCOME, menu_keyboard())
+            await self.show(event, WELCOME, self._menu())
             return
         if payload == "menu:ask":
             await self.db.set_mode(user_id, "chat")
-            await self.show(event, ASK_PROMPT, menu_keyboard())
+            await self.show(event, ASK_PROMPT, back_keyboard())
             return
         if payload == "menu:check":
             await self.db.set_mode(user_id, "check")
-            await self.show(event, CHECK_PROMPT, menu_keyboard())
+            await self.show(event, CHECK_PROMPT, back_keyboard())
             return
         if payload == "menu:search":
+            if self.cabinet_url:
+                await self._send_cabinet_link(event, chat_id, user_id)
+                return
             await self.db.set_mode(user_id, "search")
-            await self.show(event, SEARCH_PROMPT, menu_keyboard())
+            await self.show(event, SEARCH_PROMPT, back_keyboard())
             return
         if payload == "menu:quiz":
             await self.db.set_mode(user_id, "quiz_topic")
-            await self.show(event, QUIZ_PROMPT, menu_keyboard())
+            await self.show(event, QUIZ_PROMPT, back_keyboard())
             return
         if payload == "menu:own":
             await self.db.set_mode(user_id, "save_note")
-            await self.show(event, OWN_PROMPT, menu_keyboard())
+            await self.show(event, OWN_PROMPT, back_keyboard())
             return
         if payload == "menu:notes":
+            if self.cabinet_url:
+                await self._send_cabinet_link(event, chat_id, user_id)
+                return
             await self._show_notes(event, user_id, 0)
             return
         if payload == "menu:errors":
             await self._start_error_quiz(event, chat_id, user_id)
+            return
+        if payload == "menu:cabinet":
+            await self._send_cabinet_link(event, chat_id, user_id)
             return
         if payload.startswith("note:page:"):
             page = _payload_int(payload, 2)
@@ -221,10 +279,68 @@ class BotApp:
                 return
             await self._answer_quiz(event, user_id, question_id, option)
 
+    async def _onboard_step(self, user_id: int) -> str | None:
+        return onboard_step(await self.db.get_user(user_id))
+
+    async def _send_onboarding(
+        self,
+        chat_id,
+        user_id: int,
+        step: str,
+        nudge: bool = False,
+        image: InputMedia | None = None,
+    ) -> None:
+        await self.db.set_mode(user_id, "onboard_grade" if step == "grade" else "onboard_style")
+        if step == "grade":
+            text = GRADE_NUDGE if nudge else GRADE_PROMPT
+            markup = grade_keyboard()
+        else:
+            text = STYLE_PROMPT
+            markup = style_keyboard()
+        await self.send(chat_id, user_id, text, markup, image=image)
+
+    async def _show_onboarding(self, event: MessageCallback, user_id: int, step: str) -> None:
+        await self.db.set_mode(user_id, "onboard_grade" if step == "grade" else "onboard_style")
+        if step == "grade":
+            await self.show(event, GRADE_PROMPT, grade_keyboard())
+            return
+        await self.show(event, STYLE_PROMPT, style_keyboard())
+
+    async def _accept_grade(self, event: MessageCallback, user_id: int, grade: int | None) -> None:
+        if grade is None or not 1 <= grade <= 11:
+            await self._show_onboarding(event, user_id, "grade")
+            return
+        await self.db.set_grade(user_id, grade)
+        await self.db.set_mode(user_id, "onboard_style")
+        await self.show(event, STYLE_PROMPT, style_keyboard())
+
+    async def _accept_style(self, event: MessageCallback, user_id: int, style: str) -> None:
+        if style not in {"short", "detail"}:
+            await self._show_onboarding(event, user_id, "style")
+            return
+        await self.db.set_explain_style(user_id, style)
+        await self.db.set_mode(user_id, "chat")
+        await self.show(event, WELCOME, self._menu())
+
     async def _handle_command(self, chat_id, user_id: int, command: str, argument: str) -> None:
-        if command in {"/start", "/menu"}:
+        step = await self._onboard_step(user_id)
+        if command == "/start":
+            if step:
+                await self._send_onboarding(chat_id, user_id, step, image=LUMI_IMAGE)
+                return
             await self.db.set_mode(user_id, "chat")
-            await self.send(chat_id, user_id, WELCOME, menu_keyboard())
+            await self.send(chat_id, user_id, WELCOME, self._menu(), image=LUMI_IMAGE)
+            return
+        if step:
+            await self._send_onboarding(chat_id, user_id, step, nudge=True)
+            return
+        if command == "/menu":
+            await self.db.set_mode(user_id, "chat")
+            await self.send(chat_id, user_id, WELCOME, self._menu())
+            return
+        if command in {"/notes", "/search"} and self.cabinet_url:
+            await self.db.set_mode(user_id, "chat")
+            await self._send_cabinet_message(chat_id, user_id)
             return
         if command == "/notes":
             await self.db.set_mode(user_id, "chat")
@@ -236,7 +352,7 @@ class BotApp:
                 await self._handle_search(chat_id, user_id, argument)
                 return
             await self.db.set_mode(user_id, "search")
-            await self.send(chat_id, user_id, SEARCH_PROMPT, menu_keyboard())
+            await self.send(chat_id, user_id, SEARCH_PROMPT, back_keyboard())
             return
         if command == "/quiz":
             if argument:
@@ -244,25 +360,26 @@ class BotApp:
                 await self._handle_quiz_topic(chat_id, user_id, argument)
                 return
             await self.db.set_mode(user_id, "quiz_topic")
-            await self.send(chat_id, user_id, QUIZ_PROMPT, menu_keyboard())
+            await self.send(chat_id, user_id, QUIZ_PROMPT, back_keyboard())
             return
         if command == "/check":
             await self.db.set_mode(user_id, "check")
-            await self.send(chat_id, user_id, CHECK_PROMPT, menu_keyboard())
+            await self.send(chat_id, user_id, CHECK_PROMPT, back_keyboard())
             return
         if command == "/errors":
             await self.db.set_mode(user_id, "chat")
             await self._send_error_quiz(chat_id, user_id)
             return
-        await self.send(chat_id, user_id, "Такой команды нет. Выберите действие в меню.", menu_keyboard())
+        await self.send(chat_id, user_id, "Такой команды нет. Выберите действие в меню.", self._menu())
 
     async def _handle_tutor(self, chat_id, user_id: int, text: str) -> None:
         await self.send(chat_id, user_id, "Разбираю вопрос.", None)
         history = await self.db.recent_messages(user_id)
+        dossier = await student_dossier(self.db, user_id)
         try:
-            reply = await self.tutor.answer(history, text)
+            reply = await self.tutor.answer(history, text, dossier)
         except TutorError as error:
-            await self.send(chat_id, user_id, esc(error.user_message), menu_keyboard())
+            await self.send(chat_id, user_id, esc(error.user_message), self._menu())
             return
         await self._remember_reply(user_id, text, reply)
         await self.send(chat_id, user_id, esc(reply.reply), tutor_keyboard(bool(reply.full_solution)))
@@ -272,7 +389,7 @@ class BotApp:
         try:
             result = await self.tutor.check_text(text)
         except TutorError as error:
-            await self.send(chat_id, user_id, esc(error.user_message), menu_keyboard())
+            await self.send(chat_id, user_id, esc(error.user_message), self._menu())
             return
         await self._present_check(chat_id, user_id, result)
 
@@ -286,7 +403,7 @@ class BotApp:
                 chat_id,
                 user_id,
                 "Не смогла скачать фото. Пришлите его ещё раз.",
-                menu_keyboard(),
+                self._menu(),
             )
             return
         if len(data) > 8 * 1024 * 1024:
@@ -294,13 +411,13 @@ class BotApp:
                 chat_id,
                 user_id,
                 "Фото слишком большое. Пришлите снимок до 8 МБ, лучше JPG или PNG.",
-                menu_keyboard(),
+                self._menu(),
             )
             return
         try:
             result = await self.tutor.check_image(data, image_mime(data), caption)
         except TutorError as error:
-            await self.send(chat_id, user_id, esc(error.user_message), menu_keyboard())
+            await self.send(chat_id, user_id, esc(error.user_message), self._menu())
             return
         await self.db.set_mode(user_id, "chat")
         await self._present_check(chat_id, user_id, result)
@@ -309,7 +426,7 @@ class BotApp:
         check_id = await register_check(self.db, user_id, result)
         text = render_check(result)
         if check_id is None:
-            await self.send(chat_id, user_id, text, menu_keyboard())
+            await self.send(chat_id, user_id, text, self._menu())
             return
         summary = result.hint or result.praise or result.problem_text or "Проверка решения"
         await self.db.add_message(user_id, "user", "Проверка решения")
@@ -320,7 +437,7 @@ class BotApp:
         try:
             hits = await search_notes(self.db, self.tutor, user_id, query)
         except TutorError as error:
-            await self.send(chat_id, user_id, esc(error.user_message), menu_keyboard())
+            await self.send(chat_id, user_id, esc(error.user_message), self._menu())
             return
         text = render_search(query, hits)
         if not hits and not self.tutor.enabled and await self.db.count_notes(user_id):
@@ -335,29 +452,29 @@ class BotApp:
             cleaned = ensure_topic(topic)
         except TutorError as error:
             await self.db.set_mode(user_id, "quiz_topic")
-            await self.send(chat_id, user_id, esc(error.user_message), menu_keyboard())
+            await self.send(chat_id, user_id, esc(error.user_message), back_keyboard())
             return
         await self.send(chat_id, user_id, "Собираю квиз по теме.", None)
         try:
             quiz_id = await start_topic_quiz(self.db, self.tutor, user_id, cleaned)
         except TutorError as error:
-            await self.send(chat_id, user_id, esc(error.user_message), menu_keyboard())
+            await self.send(chat_id, user_id, esc(error.user_message), self._menu())
             return
         await self._send_quiz(chat_id, user_id, quiz_id)
 
     async def _handle_own_note(self, chat_id, user_id: int, text: str) -> None:
         if not text.strip():
             await self.db.set_mode(user_id, "save_note")
-            await self.send(chat_id, user_id, OWN_PROMPT, menu_keyboard())
+            await self.send(chat_id, user_id, OWN_PROMPT, back_keyboard())
             return
         note_id = await save_manual(self.db, user_id, text)
         note = await self.db.get_note(user_id, note_id)
         title = note["title"] if note else "Конспект"
-        await self.send(
+        await self._after_save(
             chat_id,
             user_id,
+            note_id,
             f"Сохранила конспект <b>{esc(title)}</b>.",
-            saved_keyboard(note_id),
         )
 
     async def _send_notes(self, chat_id, user_id: int, page: int) -> None:
@@ -383,7 +500,7 @@ class BotApp:
         notes = await self.db.list_notes(user_id, offset, PAGE_SIZE) if total else []
         has_prev = page > 0
         has_next = offset + len(notes) < total
-        markup = menu_keyboard() if total == 0 else notes_keyboard(notes, page, has_prev, has_next)
+        markup = self._menu() if total == 0 else notes_keyboard(notes, page, has_prev, has_next)
         return render_notes_page(notes, page, total), markup
 
     async def _open_note(self, event: MessageCallback, user_id: int, note_id: int) -> None:
@@ -401,11 +518,11 @@ class BotApp:
         reply = TutorReply(**last)
         note_id = await save_reply(self.db, user_id, reply, "chat")
         await self._notify(event, "Сохранила в конспекты")
-        await self.send(
+        await self._after_save(
             chat_id,
             user_id,
+            note_id,
             f"Конспект <b>{esc(reply.title)}</b> лежит в личном кабинете.",
-            saved_keyboard(note_id),
         )
 
     async def _simpler(self, event: MessageCallback, chat_id, user_id: int) -> None:
@@ -414,10 +531,11 @@ class BotApp:
             await self._notify(event, "Сначала попросите разбор")
             return
         await self._notify(event, "Упрощаю объяснение")
+        dossier = await student_dossier(self.db, user_id, records=False)
         try:
-            reply = await self.tutor.simplify(last.get("reply") or "")
+            reply = await self.tutor.simplify(last.get("reply") or "", dossier)
         except TutorError as error:
-            await self.send(chat_id, user_id, esc(error.user_message), menu_keyboard())
+            await self.send(chat_id, user_id, esc(error.user_message), self._menu())
             return
         await self._remember_reply(user_id, "Объясни проще", reply)
         await self.send(chat_id, user_id, esc(reply.reply), tutor_keyboard(bool(reply.full_solution)))
@@ -429,10 +547,11 @@ class BotApp:
             return
         await self._notify(event, "Подбираю похожую задачу")
         context = (last.get("reply") or "") + "\n" + (last.get("full_solution") or "")
+        dossier = await student_dossier(self.db, user_id)
         try:
-            reply = await self.tutor.similar(last.get("skill") or "", context)
+            reply = await self.tutor.similar(last.get("skill") or "", context, dossier)
         except TutorError as error:
-            await self.send(chat_id, user_id, esc(error.user_message), menu_keyboard())
+            await self.send(chat_id, user_id, esc(error.user_message), self._menu())
             return
         await self._remember_reply(user_id, "Похожий пример", reply)
         await self.send(chat_id, user_id, esc(reply.reply), tutor_keyboard(bool(reply.full_solution)))
@@ -464,11 +583,11 @@ class BotApp:
         note = await self.db.get_note(user_id, note_id)
         title = note["title"] if note else "Разбор"
         await self._notify(event, "Сохранила в конспекты")
-        await self.send(
+        await self._after_save(
             chat_id,
             user_id,
+            note_id,
             f"Конспект <b>{esc(title)}</b> лежит в личном кабинете.",
-            saved_keyboard(note_id),
         )
 
     async def _similar_check(self, event: MessageCallback, chat_id, user_id: int, check_id: int | None) -> None:
@@ -478,40 +597,41 @@ class BotApp:
             return
         await self._notify(event, "Подбираю похожую задачу")
         context = check["problem"] or check["hint"] or check["skill"]
+        dossier = await student_dossier(self.db, user_id)
         try:
-            reply = await self.tutor.similar(check["skill"], context)
+            reply = await self.tutor.similar(check["skill"], context, dossier)
         except TutorError as error:
-            await self.send(chat_id, user_id, esc(error.user_message), menu_keyboard())
+            await self.send(chat_id, user_id, esc(error.user_message), self._menu())
             return
         await self._remember_reply(user_id, "Похожая задача", reply)
         await self.send(chat_id, user_id, esc(reply.reply), tutor_keyboard(bool(reply.full_solution)))
 
     async def _start_error_quiz(self, event: MessageCallback, chat_id, user_id: int) -> None:
         if await self.db.count_errors(user_id) == 0:
-            await self.show(event, EMPTY_ERRORS, menu_keyboard())
+            await self.show(event, EMPTY_ERRORS, self._menu())
             return
         await self._notify(event, "Собираю квиз по ошибкам")
         await self._send_error_quiz(chat_id, user_id)
 
     async def _send_error_quiz(self, chat_id, user_id: int) -> None:
         if await self.db.count_errors(user_id) == 0:
-            await self.send(chat_id, user_id, EMPTY_ERRORS, menu_keyboard())
+            await self.send(chat_id, user_id, EMPTY_ERRORS, self._menu())
             return
         await self.send(chat_id, user_id, "Собираю квиз по ошибкам. Это займёт несколько секунд.", None)
         try:
             quiz_id = await start_error_quiz(self.db, self.tutor, user_id)
         except TutorError as error:
-            await self.send(chat_id, user_id, esc(error.user_message), menu_keyboard())
+            await self.send(chat_id, user_id, esc(error.user_message), self._menu())
             return
         if quiz_id is None:
-            await self.send(chat_id, user_id, EMPTY_ERRORS, menu_keyboard())
+            await self.send(chat_id, user_id, EMPTY_ERRORS, self._menu())
             return
         await self._send_quiz(chat_id, user_id, quiz_id)
 
     async def _send_quiz(self, chat_id, user_id: int, quiz_id: int) -> None:
         text, question = await self._quiz_screen(quiz_id)
         if question is None:
-            await self.send(chat_id, user_id, "Квиз не собрался. Попробуйте ещё раз.", menu_keyboard())
+            await self.send(chat_id, user_id, "Квиз не собрался. Попробуйте ещё раз.", self._menu())
             return
         await self.send(chat_id, user_id, text, quiz_keyboard(question["id"], option_count(question)))
 
@@ -525,11 +645,11 @@ class BotApp:
             await self._notify(event, notice)
             return
         if view.finished or view.next_question is None:
-            await self.show(event, render_finished(view), menu_keyboard())
+            await self.show(event, render_finished(view), self._menu())
             return
         quiz = await self.db.get_quiz(view.next_question["quiz_id"])
         if quiz is None:
-            await self.show(event, render_finished(view), menu_keyboard())
+            await self.show(event, render_finished(view), self._menu())
             return
         started = quiz["started_at"]
         screen = render_question(view.quiz_title, started, view.done, view.total, view.next_question)
@@ -561,12 +681,45 @@ class BotApp:
             return None
         return await self.db.get_check(user_id, check_id)
 
-    async def send(self, chat_id, user_id: int, text: str, markup) -> None:
+    async def _cabinet_open(self, user_id: int):
+        token = await self.db.create_cabinet_link(user_id)
+        url = f"{self.cabinet_url}/k/{token}"
+        return url, cabinet_link_keyboard(url)
+
+    async def _send_cabinet_message(self, chat_id, user_id: int) -> None:
+        url, markup = await self._cabinet_open(user_id)
+        await self.send(
+            chat_id,
+            user_id,
+            f"Кабинет откроется один раз в течение {CABINET_LINK_MINUTES} минут:\n{esc(url)}",
+            markup,
+        )
+
+    async def _send_cabinet_link(self, event: MessageCallback, chat_id, user_id: int) -> None:
+        if not self.cabinet_url:
+            await self._notify(event, "Кабинет пока не настроен")
+            return
+        await self._notify(event, "Ссылка на кабинет в новом сообщении")
+        await self._send_cabinet_message(chat_id, user_id)
+
+    async def _after_save(self, chat_id, user_id: int, note_id: int, text: str) -> None:
+        if self.cabinet_url:
+            _, markup = await self._cabinet_open(user_id)
+        else:
+            markup = saved_keyboard(note_id)
+        await self.send(chat_id, user_id, text, markup)
+
+    async def send(self, chat_id, user_id: int, text: str, markup, image: InputMedia | None = None) -> None:
+        attachments = []
+        if image is not None:
+            attachments.append(image)
+        if markup is not None:
+            attachments.append(markup)
         await self.bot.send_message(
             chat_id=chat_id,
             user_id=user_id,
             text=clip(text),
-            attachments=[markup] if markup is not None else None,
+            attachments=attachments or None,
             parse_mode=ParseMode.HTML,
         )
 

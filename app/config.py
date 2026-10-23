@@ -14,6 +14,7 @@ class Settings(BaseSettings):
     database_path: str = "data/tutor.db"
     web_host: str = "127.0.0.1"
     web_port: int = 8000
+    cabinet_url: str = ""
 
 
 def get_settings() -> Settings:
