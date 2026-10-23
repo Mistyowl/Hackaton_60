@@ -7,7 +7,7 @@ from maxapi.types import BotStarted, InputMedia, MessageCallback, MessageCreated
 
 from app.bot.keyboards import (
     back_keyboard,
-    cabinet_link_keyboard,
+    cabinet_keyboard,
     check_keyboard,
     grade_keyboard,
     menu_keyboard,
@@ -39,7 +39,8 @@ from app.bot.render import (
     render_question,
     render_search,
 )
-from app.db import CABINET_LINK_MINUTES, Database
+from app.config import ACCESS_CLOSED, user_allowed
+from app.db import Database
 from app.services.notes import (
     PAGE_SIZE,
     onboard_step,
@@ -52,21 +53,34 @@ from app.services.notes import (
 )
 from app.services.quiz import answer_question, ensure_topic, start_error_quiz, start_topic_quiz
 from app.services.tutor import Tutor, TutorError, TutorReply
-from app.textutil import check_prefix, clip, esc, image_mime, parse_command
+from app.textutil import check_prefix, clip, esc, image_mime, model_html, parse_command
 
 log = logging.getLogger(__name__)
 LUMI_IMAGE = InputMedia(str(Path(__file__).resolve().parent.parent / "assets" / "lumi.jpg"))
 
 
 class BotApp:
-    def __init__(self, bot, db: Database, tutor: Tutor, cabinet_url: str = "") -> None:
+    def __init__(
+        self,
+        bot,
+        db: Database,
+        tutor: Tutor,
+        cabinet_url: str = "",
+        web_app: str = "",
+        allowed_user_ids: set[int] | None = None,
+    ) -> None:
         self.bot = bot
         self.db = db
         self.tutor = tutor
         self.cabinet_url = cabinet_url.strip().rstrip("/")
+        self.web_app = web_app.strip().lstrip("@")
+        self.allowed_user_ids = allowed_user_ids or set()
+
+    def _allowed(self, user_id: int) -> bool:
+        return user_allowed(user_id, self.allowed_user_ids)
 
     def _menu(self):
-        return menu_keyboard(bool(self.cabinet_url))
+        return menu_keyboard(bool(self.cabinet_url), self.web_app)
 
     def register(self, dp) -> None:
         dp.bot_started()(self.on_started)
@@ -77,13 +91,17 @@ class BotApp:
         user = event.user
         if user is None:
             return
+        if not self._allowed(user.user_id):
+            log.info("Отказ в доступе user_id=%s", user.user_id)
+            await self.send(event.chat_id, user.user_id, ACCESS_CLOSED, None)
+            return
         await self.db.upsert_user(user.user_id, user.first_name or "")
         step = await self._onboard_step(user.user_id)
         if step:
-            await self._send_onboarding(event.chat_id, user.user_id, step)
+            await self._send_onboarding(event.chat_id, user.user_id, step, image=LUMI_IMAGE)
             return
         await self.db.set_mode(user.user_id, "chat")
-        await self.send(event.chat_id, user.user_id, WELCOME, self._menu())
+        await self.send(event.chat_id, user.user_id, WELCOME, self._menu(), image=LUMI_IMAGE)
 
     async def on_message(self, event: MessageCreated) -> None:
         try:
@@ -91,41 +109,47 @@ class BotApp:
         except Exception:
             log.exception("message handler failed")
             chat_id, user_id, _ = self._person(event)
-            if user_id is not None:
-                step = await self._onboard_step(user_id)
-                if step:
-                    await self._send_onboarding(chat_id, user_id, step, nudge=True)
-                    return
-                await self.send(
-                    chat_id,
-                    user_id,
-                    "Не получилось обработать сообщение. Попробуйте ещё раз.",
-                    self._menu(),
-                )
+            if user_id is None or not self._allowed(user_id):
+                return
+            step = await self._onboard_step(user_id)
+            if step:
+                await self._send_onboarding(chat_id, user_id, step, nudge=True)
+                return
+            await self.send(
+                chat_id,
+                user_id,
+                "Не получилось обработать сообщение. Попробуйте ещё раз.",
+                self._menu(),
+            )
 
     async def on_callback(self, event: MessageCallback) -> None:
         try:
             await self._on_callback(event)
         except Exception:
             log.exception("callback handler failed")
-            _, user_id = event.get_ids()
+            chat_id, user_id = event.get_ids()
+            if user_id is None or not self._allowed(user_id):
+                await self._notify(event, ACCESS_CLOSED)
+                return
             await self._notify(event, "Не получилось выполнить действие")
-            if user_id:
-                chat_id, _ = event.get_ids()
-                step = await self._onboard_step(user_id)
-                if step:
-                    await self._send_onboarding(chat_id, user_id, step, nudge=True)
-                    return
-                await self.send(
-                    chat_id,
-                    user_id,
-                    "Не получилось выполнить действие. Откройте меню и попробуйте ещё раз.",
-                    self._menu(),
-                )
+            step = await self._onboard_step(user_id)
+            if step:
+                await self._send_onboarding(chat_id, user_id, step, nudge=True)
+                return
+            await self.send(
+                chat_id,
+                user_id,
+                "Не получилось выполнить действие. Откройте меню и попробуйте ещё раз.",
+                self._menu(),
+            )
 
     async def _on_message(self, event: MessageCreated) -> None:
         chat_id, user_id, first_name = self._person(event)
         if user_id is None:
+            return
+        if not self._allowed(user_id):
+            log.info("Отказ в доступе user_id=%s", user_id)
+            await self.send(chat_id, user_id, ACCESS_CLOSED, None)
             return
         await self.db.upsert_user(user_id, first_name)
         body = event.message.body
@@ -177,6 +201,10 @@ class BotApp:
         chat_id, user_id = event.get_ids()
         if user_id is None:
             return
+        if not self._allowed(user_id):
+            log.info("Отказ в доступе user_id=%s", user_id)
+            await self._notify(event, ACCESS_CLOSED)
+            return
         name = ""
         if event.callback.user is not None:
             name = event.callback.user.first_name or ""
@@ -206,7 +234,7 @@ class BotApp:
             return
         if payload == "menu:search":
             if self.cabinet_url:
-                await self._send_cabinet_link(event, chat_id, user_id)
+                await self._offer_cabinet(event, chat_id, user_id)
                 return
             await self.db.set_mode(user_id, "search")
             await self.show(event, SEARCH_PROMPT, back_keyboard())
@@ -221,7 +249,7 @@ class BotApp:
             return
         if payload == "menu:notes":
             if self.cabinet_url:
-                await self._send_cabinet_link(event, chat_id, user_id)
+                await self._offer_cabinet(event, chat_id, user_id)
                 return
             await self._show_notes(event, user_id, 0)
             return
@@ -229,7 +257,7 @@ class BotApp:
             await self._start_error_quiz(event, chat_id, user_id)
             return
         if payload == "menu:cabinet":
-            await self._send_cabinet_link(event, chat_id, user_id)
+            await self._offer_cabinet(event, chat_id, user_id)
             return
         if payload.startswith("note:page:"):
             page = _payload_int(payload, 2)
@@ -292,7 +320,7 @@ class BotApp:
     ) -> None:
         await self.db.set_mode(user_id, "onboard_grade" if step == "grade" else "onboard_style")
         if step == "grade":
-            text = GRADE_NUDGE if nudge else GRADE_PROMPT
+            text = GRADE_NUDGE if nudge else f"{WELCOME}\n\n{GRADE_PROMPT}"
             markup = grade_keyboard()
         else:
             text = STYLE_PROMPT
@@ -382,7 +410,7 @@ class BotApp:
             await self.send(chat_id, user_id, esc(error.user_message), self._menu())
             return
         await self._remember_reply(user_id, text, reply)
-        await self.send(chat_id, user_id, esc(reply.reply), tutor_keyboard(bool(reply.full_solution)))
+        await self.send(chat_id, user_id, model_html(reply.reply), tutor_keyboard(bool(reply.full_solution)))
 
     async def _handle_check_text(self, chat_id, user_id: int, text: str) -> None:
         await self.send(chat_id, user_id, "Проверяю решение.", None)
@@ -538,7 +566,7 @@ class BotApp:
             await self.send(chat_id, user_id, esc(error.user_message), self._menu())
             return
         await self._remember_reply(user_id, "Объясни проще", reply)
-        await self.send(chat_id, user_id, esc(reply.reply), tutor_keyboard(bool(reply.full_solution)))
+        await self.send(chat_id, user_id, model_html(reply.reply), tutor_keyboard(bool(reply.full_solution)))
 
     async def _similar_tutor(self, event: MessageCallback, chat_id, user_id: int) -> None:
         last = await self.db.get_last_tutor(user_id)
@@ -554,7 +582,7 @@ class BotApp:
             await self.send(chat_id, user_id, esc(error.user_message), self._menu())
             return
         await self._remember_reply(user_id, "Похожий пример", reply)
-        await self.send(chat_id, user_id, esc(reply.reply), tutor_keyboard(bool(reply.full_solution)))
+        await self.send(chat_id, user_id, model_html(reply.reply), tutor_keyboard(bool(reply.full_solution)))
 
     async def _show_tutor_solution(self, event: MessageCallback, chat_id, user_id: int) -> None:
         last = await self.db.get_last_tutor(user_id)
@@ -563,7 +591,7 @@ class BotApp:
             await self._notify(event, "Полный разбор для этого ответа не прятался")
             return
         await self._notify(event, "Показываю полный разбор")
-        await self.send(chat_id, user_id, esc(solution), tutor_keyboard(False))
+        await self.send(chat_id, user_id, model_html(solution), tutor_keyboard(False))
 
     async def _reveal_check(self, event: MessageCallback, chat_id, user_id: int, check_id: int | None) -> None:
         check = await self._owned_check(user_id, check_id)
@@ -572,7 +600,7 @@ class BotApp:
             return
         solution = check["full_explanation"] or "Полный разбор не собрался. Пришлите решение ещё раз."
         await self._notify(event, "Показываю полный разбор")
-        await self.send(chat_id, user_id, esc(solution), check_keyboard(check["id"], True))
+        await self.send(chat_id, user_id, model_html(solution), check_keyboard(check["id"], True))
 
     async def _save_check_note(self, event: MessageCallback, chat_id, user_id: int, check_id: int | None) -> None:
         check = await self._owned_check(user_id, check_id)
@@ -604,7 +632,7 @@ class BotApp:
             await self.send(chat_id, user_id, esc(error.user_message), self._menu())
             return
         await self._remember_reply(user_id, "Похожая задача", reply)
-        await self.send(chat_id, user_id, esc(reply.reply), tutor_keyboard(bool(reply.full_solution)))
+        await self.send(chat_id, user_id, model_html(reply.reply), tutor_keyboard(bool(reply.full_solution)))
 
     async def _start_error_quiz(self, event: MessageCallback, chat_id, user_id: int) -> None:
         if await self.db.count_errors(user_id) == 0:
@@ -681,30 +709,24 @@ class BotApp:
             return None
         return await self.db.get_check(user_id, check_id)
 
-    async def _cabinet_open(self, user_id: int):
-        token = await self.db.create_cabinet_link(user_id)
-        url = f"{self.cabinet_url}/k/{token}"
-        return url, cabinet_link_keyboard(url)
-
     async def _send_cabinet_message(self, chat_id, user_id: int) -> None:
-        url, markup = await self._cabinet_open(user_id)
         await self.send(
             chat_id,
             user_id,
-            f"Кабинет откроется один раз в течение {CABINET_LINK_MINUTES} минут:\n{esc(url)}",
-            markup,
+            "Кабинет откроется вашим: конспекты, поиск и ошибки.",
+            cabinet_keyboard(self.web_app),
         )
 
-    async def _send_cabinet_link(self, event: MessageCallback, chat_id, user_id: int) -> None:
+    async def _offer_cabinet(self, event: MessageCallback, chat_id, user_id: int) -> None:
         if not self.cabinet_url:
             await self._notify(event, "Кабинет пока не настроен")
             return
-        await self._notify(event, "Ссылка на кабинет в новом сообщении")
+        await self._notify(event, "Кнопка кабинета в новом сообщении")
         await self._send_cabinet_message(chat_id, user_id)
 
     async def _after_save(self, chat_id, user_id: int, note_id: int, text: str) -> None:
         if self.cabinet_url:
-            _, markup = await self._cabinet_open(user_id)
+            markup = cabinet_keyboard(self.web_app)
         else:
             markup = saved_keyboard(note_id)
         await self.send(chat_id, user_id, text, markup)

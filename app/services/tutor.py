@@ -3,6 +3,7 @@ import logging
 from dataclasses import dataclass
 from pathlib import Path
 
+import httpx
 from google import genai
 from google.genai import types
 from pydantic import BaseModel, Field
@@ -137,10 +138,21 @@ def _strip_json(text: str) -> str:
 
 
 class Tutor:
-    def __init__(self, api_key: str, model: str) -> None:
+    def __init__(self, api_key: str, model: str, proxy_url: str = "") -> None:
         self.model = model
         self.enabled = bool(api_key.strip())
-        self._client = genai.Client(api_key=api_key) if self.enabled else None
+        http_options = None
+        if proxy_url:
+            # The async SDK prefers aiohttp, which treats this URL as an HTTP proxy.
+            http_options = types.HttpOptions(
+                httpx_client=httpx.Client(proxy=proxy_url, timeout=None, trust_env=False),
+                httpx_async_client=httpx.AsyncClient(
+                    proxy=proxy_url, timeout=None, trust_env=False
+                ),
+            )
+        self._client = (
+            genai.Client(api_key=api_key, http_options=http_options) if self.enabled else None
+        )
 
     def _require(self) -> genai.Client:
         if self._client is None:

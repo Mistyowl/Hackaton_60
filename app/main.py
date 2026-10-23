@@ -15,10 +15,22 @@ from app.web import create_app
 log = logging.getLogger(__name__)
 
 
-async def run_bot(token: str, db: Database, tutor: Tutor, cabinet_url: str) -> None:
+async def run_bot(
+    token: str,
+    db: Database,
+    tutor: Tutor,
+    cabinet_url: str,
+    allowed_user_ids: set[int],
+) -> None:
     bot = Bot(token=token, parse_mode=ParseMode.HTML)
     dispatcher = Dispatcher()
-    BotApp(bot, db, tutor, cabinet_url).register(dispatcher)
+    web_app = ""
+    try:
+        me = await bot.get_me()
+        web_app = getattr(me, "username", "") or ""
+    except Exception:
+        log.warning("Не удалось узнать имя бота для кнопки кабинета.", exc_info=True)
+    BotApp(bot, db, tutor, cabinet_url, web_app, allowed_user_ids).register(dispatcher)
     try:
         await bot.delete_webhook()
     except Exception:
@@ -43,10 +55,16 @@ async def amain() -> None:
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
     settings = get_settings()
+    allowed = settings.allowed_ids()
+    if allowed:
+        log.info("Доступ ограничен, пользователей: %s", len(allowed))
     db = Database(settings.database_path)
     await db.connect()
-    tutor = Tutor(settings.gemini_api_key, settings.gemini_model)
-    app = create_app(db, tutor)
+    proxy_url = settings.gemini_proxy_url()
+    if settings.proxy_host.strip():
+        log.info("Gemini через SOCKS5 %s:%s", settings.proxy_host.strip(), settings.proxy_port)
+    tutor = Tutor(settings.gemini_api_key, settings.gemini_model, proxy_url)
+    app = create_app(db, tutor, settings.max_bot_token, allowed)
     server = uvicorn.Server(
         uvicorn.Config(
             app,
@@ -63,7 +81,7 @@ async def amain() -> None:
             group.create_task(server.serve())
             token = settings.max_bot_token.strip()
             if token:
-                group.create_task(run_bot(token, db, tutor, settings.cabinet_url))
+                group.create_task(run_bot(token, db, tutor, settings.cabinet_url, allowed))
             else:
                 log.warning("MAX_BOT_TOKEN пуст: бот не запущен, открыт только кабинет.")
     finally:

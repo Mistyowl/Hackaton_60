@@ -16,6 +16,95 @@ def esc(value: str) -> str:
     return html.escape(value or "", quote=False)
 
 
+_MARK = re.compile(r"\*\*([^*\n]+)\*\*|`([^`\n]+)`")
+_LABEL = re.compile(r"^(Пример|Итог|Ответ|Шаг\s+\d+)\s*:\s*(.*)$", re.IGNORECASE)
+_TRAILING_LABEL = re.compile(r"(Пример|Итог|Ответ):\s*$", re.IGNORECASE)
+_CYRILLIC_WORD = re.compile(r"[А-Яа-яЁё]{3,}")
+_INLINE_FORMULA = re.compile(
+    r"(?<![A-Za-zА-Яа-яЁё0-9_])"
+    r"([A-Za-z0-9()]+\s*/\s*[A-Za-z0-9()]+"
+    r"(?:\s*[:*+\-×÷]\s*(?:[A-Za-z0-9()]+\s*/\s*[A-Za-z0-9()]+|\([^)]*\)|[A-Za-z0-9()]+))+"
+    r"\s*=\s*[A-Za-z0-9()*/:+\-×÷ ]*[A-Za-z0-9)])"
+)
+
+
+def model_html(value: str) -> str:
+    rendered = "\n".join(_format_line(line) for line in (value or "").split("\n"))
+    return re.sub(r"\n{3,}", "\n\n", rendered).strip()
+
+
+def _format_line(line: str) -> str:
+    stripped = line.strip()
+    label = _LABEL.match(stripped)
+    if label and _is_formula(label.group(2)):
+        return f"<b>{esc(label.group(1))}:</b>\n<b>{esc(label.group(2).strip())}</b>"
+    if _is_formula(stripped):
+        return f"<b>{esc(stripped)}</b>"
+    return _markup_inline(line)
+
+
+def _markup_inline(text: str) -> str:
+    chunks: list[str] = []
+    position = 0
+    for match in _MARK.finditer(text):
+        chunks.append(_plain(text[position : match.start()]))
+        if match.group(1) is not None:
+            chunks.append("<b>" + esc(match.group(1)) + "</b>")
+            position = match.end()
+            continue
+        formula = match.group(2).strip()
+        label = ""
+        if "=" in formula and chunks:
+            chunks[-1], label = _detach_label(chunks[-1])
+            if label:
+                chunks.append(label)
+        piece = ("<b>" if "=" in formula else "<code>") + esc(formula) + ("</b>" if "=" in formula else "</code>")
+        if "=" in formula and not label:
+            piece = "\n" + piece
+        chunks.append(piece + ("\n" if "=" in formula else ""))
+        position = match.end()
+        if "=" in formula and position < len(text) and text[position] == ".":
+            position += 1
+            if position < len(text) and text[position] == " ":
+                position += 1
+    chunks.append(_plain(text[position:]))
+    return "".join(chunks)
+
+
+def _plain(text: str) -> str:
+    if not text:
+        return ""
+    chunks: list[str] = []
+    position = 0
+    for match in _INLINE_FORMULA.finditer(text):
+        before, label = _detach_label(esc(text[position : match.start()]))
+        chunks.append(before)
+        if label:
+            chunks.append(label)
+        chunks.append("\n<b>" + esc(match.group(1).strip()) + "</b>\n")
+        position = match.end()
+        if position < len(text) and text[position] == ".":
+            position += 1
+            if position < len(text) and text[position] == " ":
+                position += 1
+    chunks.append(esc(text[position:]))
+    return "".join(chunks)
+
+
+def _detach_label(html: str) -> tuple[str, str]:
+    match = _TRAILING_LABEL.search(html)
+    if match is None:
+        return html, ""
+    return html[: match.start()].rstrip(), f"\n<b>{match.group(1)}:</b>\n"
+
+
+def _is_formula(line: str) -> bool:
+    stripped = line.strip()
+    if not stripped or "=" not in stripped or len(stripped) > 180:
+        return False
+    return len(_CYRILLIC_WORD.findall(stripped)) <= 1
+
+
 def clip(value: str, limit: int = MESSAGE_LIMIT) -> str:
     if len(value) <= limit:
         return value

@@ -1,3 +1,4 @@
+import json
 import tempfile
 import unittest
 from datetime import datetime, timezone
@@ -6,7 +7,11 @@ from pathlib import Path
 from httpx import ASGITransport, AsyncClient
 
 from app.bot.commands import bot_commands
-from app.bot.keyboards import cabinet_link_keyboard, grade_keyboard, menu_keyboard, style_keyboard
+from app.config import gemini_proxy_url, parse_allowed_user_ids, user_allowed
+from app.services.tutor import Tutor
+from maxapi.types.updates.message_callback import MessageForCallback
+
+from app.bot.keyboards import cabinet_keyboard, grade_keyboard, menu_keyboard, style_keyboard
 from app.db import Database
 from app.services.notes import onboard_step, register_check, save_manual, search_notes, student_dossier
 from app.services.quiz import answer_question
@@ -25,9 +30,13 @@ from app.textutil import (
     format_elapsed,
     fts_match,
     markers_to_html,
+    model_html,
     parse_command,
 )
 from app.web import create_app
+from app.webapp import MAX_INIT_AGE_SECONDS, sign_init_data, validate_init_data
+
+BOT_TOKEN = "test-bot-token"
 
 
 class TextTests(unittest.TestCase):
@@ -44,7 +53,64 @@ class TextTests(unittest.TestCase):
         self.assertEqual(format_elapsed(start.isoformat(), now), "1 мин 12 сек")
         raw = f"катет {MARK_START}Пифагор{MARK_END} <угол>"
         self.assertEqual(markers_to_html(raw), "катет <b>Пифагор</b> &lt;угол&gt;")
+        marked = "шаг **деления** и `x+1` <b>"
+        self.assertEqual(
+            model_html(marked),
+            "шаг <b>деления</b> и <code>x+1</code> &lt;b&gt;",
+        )
+        self.assertEqual(model_html("2 * 2 и **\nнет**"), "2 * 2 и **\nнет**")
+        self.assertEqual(model_html("a/b = c/d"), "<b>a/b = c/d</b>")
+        self.assertEqual(
+            model_html("Пример: 2/3 = 4/5"),
+            "<b>Пример:</b>\n<b>2/3 = 4/5</b>",
+        )
+        sample = "разберем **деление дробей**. Пример: `a/b : c/d = a/b * d/c`. Дальше"
+        self.assertIn("<b>деление дробей</b>", model_html(sample))
+        self.assertIn("<b>Пример:</b>\n<b>a/b : c/d = a/b * d/c</b>", model_html(sample))
+        self.assertIn("Дальше", model_html(sample))
         self.assertEqual(fts_match('знак "переноса"'), '"знак" AND "переноса"')
+
+
+class ProxyTests(unittest.TestCase):
+    def test_empty_host_has_no_proxy(self) -> None:
+        self.assertEqual(gemini_proxy_url("", 1080, "user", "secret"), "")
+        self.assertEqual(gemini_proxy_url("   ", 1080, "user", "secret"), "")
+
+    def test_socks5_url_quotes_credentials(self) -> None:
+        url = gemini_proxy_url("proxy.example", 1080, "user", "p@ss word")
+        self.assertTrue(url.startswith("socks5://"))
+        self.assertIn("p%40ss%20word", url)
+        self.assertNotIn("p@ss word", url)
+        self.assertIn("@proxy.example:1080", url)
+        self.assertEqual(gemini_proxy_url("10.0.0.1", 1080, "", ""), "socks5://10.0.0.1:1080")
+
+    def test_host_without_port_fails(self) -> None:
+        with self.assertRaises(ValueError):
+            gemini_proxy_url("proxy.example", 0, "", "")
+
+    def test_gemini_proxy_uses_httpx_not_aiohttp(self) -> None:
+        tutor = Tutor("test-key", "gemini-test", "socks5://user:secret@proxy.example:1080")
+        api = tutor._client._api_client
+        self.assertFalse(api._use_aiohttp())
+        self.assertIsNotNone(api._http_options.httpx_async_client)
+        self.assertIsNotNone(api._http_options.httpx_client)
+
+
+class AllowTests(unittest.TestCase):
+    def test_empty_list_allows_anyone(self) -> None:
+        self.assertEqual(parse_allowed_user_ids(""), set())
+        self.assertEqual(parse_allowed_user_ids(" , "), set())
+        self.assertTrue(user_allowed(99, set()))
+
+    def test_listed_ids_only(self) -> None:
+        allowed = parse_allowed_user_ids("11, 22,33")
+        self.assertEqual(allowed, {11, 22, 33})
+        self.assertTrue(user_allowed(11, allowed))
+        self.assertTrue(user_allowed(22, allowed))
+        self.assertTrue(user_allowed(33, allowed))
+        self.assertFalse(user_allowed(1, allowed))
+        with self.assertRaises(ValueError):
+            parse_allowed_user_ids("11,abc")
 
 
 class NormalizeTests(unittest.TestCase):
@@ -254,7 +320,7 @@ class DatabaseTests(unittest.IsolatedAsyncioTestCase):
         stranger = await answer_question(self.db, 2, returned["id"], 1)
         self.assertTrue(stranger.missing)
 
-    async def test_cabinet_link_opens_once_for_one_student(self) -> None:
+    async def test_cabinet_opens_for_the_signed_student(self) -> None:
         await self.db.set_grade(1, 7)
         await self.db.set_explain_style(1, "detail")
         await self.db.insert_note(
@@ -273,20 +339,19 @@ class DatabaseTests(unittest.IsolatedAsyncioTestCase):
         )
         await self.db.insert_error(1, "Алгебра", "Я" * 400, "приём-деления", "СКРЫТЫЙ РАЗБОР")
         await self.db.insert_error(2, "Физика", "чужая задача", "секрет Бори", "чужой разбор")
-        token = await self.db.create_cabinet_link(1)
-        self.assertGreaterEqual(len(token), 8)
-        self.assertLessEqual(len(token), 16)
-        app = create_app(self.db, FakeTutor())
+        app = create_app(self.db, FakeTutor(), BOT_TOKEN)
         transport = ASGITransport(app=app)
-        async with AsyncClient(transport=transport, base_url="http://cabinet") as client:
+        anya = _init_data(1, "Аня")
+        async with AsyncClient(transport=transport, base_url="https://cabinet") as client:
             health = await client.get("/health")
             self.assertEqual(health.status_code, 200)
             page = await client.get("/")
             self.assertIn("<mark>", page.text)
-            self.assertIn("Откройте кабинет из чата с ботом", page.text)
+            self.assertIn("Откройте кабинет кнопкой в чате MAX", page.text)
+            self.assertIn("https://st.max.ru/js/max-web-app.js", page.text)
             self.assertNotIn("Боря", page.text)
             self.assertNotIn("Секрет Бори", page.text)
-            self.assertNotIn("мини-приложен", page.text.lower())
+            self.assertNotIn("/k/", page.text)
             self.assertEqual((await client.get("/api/profile")).status_code, 401)
             self.assertEqual((await client.get("/api/users")).status_code, 404)
             self.assertEqual(
@@ -296,12 +361,15 @@ class DatabaseTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual((await client.get("/api/notes")).status_code, 401)
             self.assertEqual((await client.get("/api/errors")).status_code, 401)
 
-            first = await client.get(f"/k/{token}", follow_redirects=False)
-            self.assertEqual(first.status_code, 302)
-            self.assertEqual(first.headers["location"], "/")
+            forged = await client.post("/api/session", json={"init_data": anya[:-4] + "abcd"})
+            self.assertEqual(forged.status_code, 401)
+            self.assertEqual((await client.get(f"/k/{anya}")).status_code, 404)
+            first = await client.post("/api/session", json={"init_data": anya, "user_id": 2})
+            self.assertEqual(first.status_code, 200)
             cookie = first.headers["set-cookie"]
             self.assertIn("cabinet=", cookie)
             self.assertIn("HttpOnly", cookie)
+            self.assertIn("Secure", cookie)
             self.assertIn("samesite=lax", cookie.lower())
             self.assertIn("Path=/", cookie)
             self.assertIn("Max-Age=2700", cookie)
@@ -342,58 +410,44 @@ class DatabaseTests(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn("секрет Бори", mistakes.text)
             self.assertLessEqual(len(error_rows[0]["problem"]), 180)
 
-        async with AsyncClient(transport=transport, base_url="http://cabinet") as replay:
-            second = await replay.get(f"/k/{token}", follow_redirects=False)
-            self.assertEqual(second.status_code, 200)
-            self.assertIn("Ссылка уже не действует", second.text)
-            self.assertNotIn("set-cookie", {key.lower() for key in second.headers})
-            self.assertEqual((await replay.get("/api/profile")).status_code, 401)
-            self.assertNotIn("Боря", second.text)
-            self.assertNotIn("Аня", second.text)
-
-        expired = await self.db.create_cabinet_link(1)
-        await self.db.conn.execute(
-            "UPDATE cabinet_links SET expires_at = ? WHERE token = ?",
-            ("2000-01-01T00:00:00+00:00", expired),
-        )
-        await self.db.conn.commit()
-        async with AsyncClient(transport=transport, base_url="http://cabinet") as stale:
-            opened = await stale.get(f"/k/{expired}", follow_redirects=False)
-            self.assertEqual(opened.status_code, 200)
-            self.assertIn("Ссылка уже не действует", opened.text)
+        async with AsyncClient(transport=transport, base_url="https://cabinet") as replay:
+            stale = _init_data(1, "Аня", auth_date=int(datetime.now(timezone.utc).timestamp()) - MAX_INIT_AGE_SECONDS - 5)
+            opened = await replay.post("/api/session", json={"init_data": stale})
+            self.assertEqual(opened.status_code, 401)
             self.assertNotIn("set-cookie", {key.lower() for key in opened.headers})
-            self.assertEqual((await stale.get("/api/profile")).status_code, 401)
+            self.assertEqual((await replay.get("/api/profile")).status_code, 401)
+            self.assertNotIn("Боря", opened.text)
+            self.assertNotIn("Аня", opened.text)
 
-        await self.db.conn.execute(
-            """
-            INSERT INTO cabinet_links (token, user_id, expires_at)
-            VALUES (?, ?, ?)
-            """,
-            ("ghost-link-token", 99, "2999-01-01T00:00:00+00:00"),
-        )
-        await self.db.conn.commit()
-        async with AsyncClient(transport=transport, base_url="http://cabinet") as ghost:
-            opened = await ghost.get("/k/ghost-link-token", follow_redirects=False)
-            self.assertEqual(opened.status_code, 302)
-            self.assertEqual((await ghost.get("/api/profile")).status_code, 401)
-        self.assertIsNone(await self.db.find_user(99))
+        async with AsyncClient(transport=transport, base_url="https://cabinet") as fresh:
+            again = await fresh.post("/api/session", json={"init_data": anya})
+            self.assertEqual(again.status_code, 200)
+            profile = await fresh.get("/api/profile")
+            self.assertEqual(profile.json()["first_name"], "Аня")
+
+        async with AsyncClient(transport=transport, base_url="https://cabinet") as ghost:
+            opened = await ghost.post("/api/session", json={"init_data": _init_data(99, "Гость")})
+            self.assertEqual(opened.status_code, 200)
+            profile = await ghost.get("/api/profile")
+            self.assertEqual(profile.json()["first_name"], "Гость")
+            self.assertEqual((await ghost.get("/api/notes")).json()["total"], 0)
+            self.assertNotIn("Аня", profile.text)
+        self.assertIsNotNone(await self.db.find_user(99))
 
     async def test_cabinet_delete_belongs_to_the_session(self) -> None:
         own = await self.db.insert_note(1, "Свой конспект", "Математика", "только Аня", "manual")
         kept = await self.db.insert_note(1, "Второй конспект", "Математика", "тоже Аня", "manual")
         foreign = await self.db.insert_note(2, "Чужой конспект", "Физика", "только Боря", "manual")
-        app = create_app(self.db, FakeTutor())
+        app = create_app(self.db, FakeTutor(), BOT_TOKEN)
         transport = ASGITransport(app=app)
-        anya = await self.db.create_cabinet_link(1)
-        borya = await self.db.create_cabinet_link(2)
-        async with AsyncClient(transport=transport, base_url="http://cabinet") as anon:
+        async with AsyncClient(transport=transport, base_url="https://cabinet") as anon:
             page = await anon.get("/")
             self.assertIn("Удалить", page.text)
             self.assertEqual((await anon.delete(f"/api/notes/{own}")).status_code, 401)
             self.assertIsNotNone(await self.db.get_note(1, own))
-        async with AsyncClient(transport=transport, base_url="http://cabinet") as owner:
-            opened = await owner.get(f"/k/{anya}", follow_redirects=False)
-            self.assertEqual(opened.status_code, 302)
+        async with AsyncClient(transport=transport, base_url="https://cabinet") as owner:
+            opened = await owner.post("/api/session", json={"init_data": _init_data(1, "Аня")})
+            self.assertEqual(opened.status_code, 200)
             missed = await owner.delete(f"/api/notes/{foreign}")
             self.assertEqual(missed.status_code, 404)
             self.assertIsNotNone(await self.db.get_note(2, foreign))
@@ -401,11 +455,34 @@ class DatabaseTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(removed.status_code, 200)
             self.assertTrue(removed.json()["deleted"])
             self.assertIsNone(await self.db.get_note(1, own))
-        async with AsyncClient(transport=transport, base_url="http://cabinet") as stranger:
-            await stranger.get(f"/k/{borya}", follow_redirects=False)
+        async with AsyncClient(transport=transport, base_url="https://cabinet") as stranger:
+            await stranger.post("/api/session", json={"init_data": _init_data(2, "Боря")})
             blocked = await stranger.delete(f"/api/notes/{kept}")
             self.assertEqual(blocked.status_code, 404)
             self.assertIsNotNone(await self.db.get_note(1, kept))
+
+    async def test_cabinet_rejects_user_outside_allowlist(self) -> None:
+        allowed = {11, 22, 33}
+        app = create_app(self.db, FakeTutor(), BOT_TOKEN, allowed)
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="https://cabinet") as client:
+            blocked = await client.post("/api/session", json={"init_data": _init_data(99, "Гость")})
+            self.assertEqual(blocked.status_code, 403)
+            self.assertIn("участников теста", blocked.text)
+            self.assertNotIn("set-cookie", {key.lower() for key in blocked.headers})
+            self.assertIsNone(await self.db.find_user(99))
+            opened = await client.post(
+                "/api/session",
+                json={"init_data": _init_data(11, "Лена")},
+            )
+            self.assertEqual(opened.status_code, 200)
+            self.assertEqual((await client.get("/api/profile")).json()["first_name"], "Лена")
+        token = await self.db.create_cabinet_session(2)
+        async with AsyncClient(transport=transport, base_url="https://cabinet") as stranger:
+            stranger.cookies.set("cabinet", token)
+            profile = await stranger.get("/api/profile")
+            self.assertEqual(profile.status_code, 403)
+            self.assertIn("участников теста", profile.text)
 
     async def test_dossier_uses_only_this_student(self) -> None:
         await self.db.upsert_user(3, "")
@@ -479,14 +556,21 @@ class DatabaseTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("menu:search", menu_payloads)
         self.assertIn("menu:notes", menu_payloads)
         self.assertNotIn("menu:cabinet", menu_payloads)
+        opened = menu_keyboard(True, "ideya_fiks_60_bot")
         with_cabinet = [
-            button.payload for row in menu_keyboard(True).payload.buttons for button in row
+            button.payload for row in opened.payload.buttons for button in row if button.payload
         ]
-        self.assertIn("menu:cabinet", with_cabinet)
+        self.assertNotIn("menu:cabinet", with_cabinet)
         self.assertIn("menu:ask", with_cabinet)
         self.assertIn("menu:own", with_cabinet)
         self.assertNotIn("menu:search", with_cabinet)
         self.assertNotIn("menu:notes", with_cabinet)
+        cabinet_button = opened.model_dump()["payload"]["buttons"][-1][0]
+        self.assertEqual(cabinet_button["type"], "open_app")
+        self.assertEqual(cabinet_button["text"], "Кабинет")
+        self.assertEqual(cabinet_button["web_app"], "ideya_fiks_60_bot")
+        self.assertNotIn("contact_id", cabinet_button)
+        self.assertNotIn("payload", cabinet_button)
         published = [command.name for command in bot_commands()]
         self.assertIn("notes", published)
         self.assertIn("search", published)
@@ -495,12 +579,52 @@ class DatabaseTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("search", hidden)
         self.assertIn("quiz", hidden)
         self.assertIn("check", hidden)
-        link = cabinet_link_keyboard("http://127.0.0.1:8000/k/abc")
-        opener = link.payload.buttons[0][0]
-        self.assertEqual(opener.text, "Открыть")
-        self.assertEqual(opener.url, "http://127.0.0.1:8000/k/abc")
+        link = cabinet_keyboard("ideya_fiks_60_bot")
+        opener = link.model_dump()["payload"]["buttons"][0][0]
+        self.assertEqual(opener["text"], "Кабинет")
+        self.assertEqual(opener["type"], "open_app")
+        self.assertEqual(opener["web_app"], "ideya_fiks_60_bot")
+        edited = MessageForCallback(text="Меню", attachments=[opened, link])
+        for stored in edited.attachments:
+            open_app = [
+                button
+                for row in stored.model_dump()["payload"]["buttons"]
+                for button in row
+                if button["type"] == "open_app"
+            ]
+            self.assertEqual(len(open_app), 1)
+            self.assertNotIn("contact_id", open_app[0])
+            self.assertNotIn("payload", open_app[0])
         await self.db.set_explain_style(1, "short")
         self.assertIsNone(onboard_step(await self.db.get_user(1)))
+
+
+class WebAppTests(unittest.TestCase):
+    def test_signed_launch_names_the_student(self) -> None:
+        now = 1_700_000_000
+        raw = _init_data(7, "Аня Петрова", auth_date=now)
+        user = validate_init_data(raw, BOT_TOKEN, now + 10)
+        assert user is not None
+        self.assertEqual(user.user_id, 7)
+        self.assertEqual(user.first_name, "Аня Петрова")
+        self.assertIsNone(validate_init_data(raw, "other-token", now + 10))
+        self.assertIsNone(validate_init_data(raw + "&hash=second", BOT_TOKEN, now + 10))
+        self.assertIsNone(validate_init_data(raw, BOT_TOKEN, now + MAX_INIT_AGE_SECONDS + 5))
+        self.assertIsNone(validate_init_data(raw.replace("1700000000", "1700000001", 1), BOT_TOKEN, now + 10))
+
+
+def _init_data(user_id: int, first_name: str, *, auth_date: int | None = None, token: str = BOT_TOKEN) -> str:
+    if auth_date is None:
+        auth_date = int(datetime.now(timezone.utc).timestamp())
+    user = json.dumps(
+        {"id": user_id, "first_name": first_name},
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    return sign_init_data(
+        {"auth_date": str(auth_date), "query_id": "cabinet-test", "user": user},
+        token,
+    )
 
 
 if __name__ == "__main__":

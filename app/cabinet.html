@@ -94,7 +94,7 @@
   <main>
     <h1>Кабинет</h1>
     <p id="who" class="lead" hidden></p>
-    <p id="gate" class="lead">Откройте кабинет из чата с ботом.</p>
+    <p id="gate" class="lead">Откройте кабинет кнопкой в чате MAX.</p>
     <div id="cabinet" hidden>
       <section>
         <h2>Поиск</h2>
@@ -114,9 +114,9 @@
       </section>
     </div>
   </main>
+  <script src="https://st.max.ru/js/max-web-app.js"></script>
   <script>
-    const LOCKED = "Откройте кабинет из чата с ботом.";
-    const BURNED = "Ссылка уже не действует. Нажмите «Кабинет» в чате ещё раз.";
+    const LOCKED = "Откройте кабинет кнопкой в чате MAX.";
     const notesBox = document.querySelector("#notes");
     const errorsBox = document.querySelector("#errors");
     const resultsBox = document.querySelector("#results");
@@ -135,6 +135,12 @@
       })[char]);
     }
 
+    function polish(html) {
+      return html
+        .replace(/\*\*([^*\n]+)\*\*/g, "<b>$1</b>")
+        .replace(/`([^`\n]+)`/g, "$1");
+    }
+
     function highlight(value, query) {
       let html = escapeHtml(value);
       const words = String(query || "").trim().split(/\s+/).filter(Boolean);
@@ -142,7 +148,7 @@
         const pattern = new RegExp(word.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "gi");
         html = html.replace(pattern, (match) => "<mark>" + match + "</mark>");
       });
-      return html;
+      return polish(html);
     }
 
     function showGate(text) {
@@ -179,7 +185,7 @@
         previews.set(String(note.id), note.preview || "");
         return `
           <article class="note" data-id="${escapeHtml(note.id)}">
-            <h3>${escapeHtml(note.title)}</h3>
+            <h3>${polish(escapeHtml(note.title))}</h3>
             <div class="meta">${escapeHtml(note.subject || "без предмета")}</div>
             <div class="snippet">${highlight(note.preview || "", queryInput.value)}</div>
           </article>
@@ -330,11 +336,29 @@
       showDelete(article);
     });
 
-    if (location.pathname.startsWith("/k/")) {
-      showGate(BURNED);
-    } else {
-      loadCabinet().catch(() => showGate("Кабинет не смог открыть базу."));
+    async function enter() {
+      const webApp = window.WebApp;
+      const initData = webApp && typeof webApp.initData === "string" ? webApp.initData : "";
+      if (webApp && typeof webApp.ready === "function") webApp.ready();
+      if (initData) {
+        const response = await fetch("/api/session", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ init_data: initData })
+        });
+        if (response.status === 401) {
+          showGate("Не удалось подтвердить вход. Закройте кабинет и откройте его кнопкой в чате.");
+          return;
+        }
+        if (!response.ok) {
+          showGate("Кабинет не смог открыть базу.");
+          return;
+        }
+      }
+      await loadCabinet();
     }
+
+    enter().catch(() => showGate("Кабинет не смог открыть базу."));
   </script>
 </body>
 </html>

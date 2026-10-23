@@ -3,7 +3,7 @@ import json
 from app.services.notes import NoteHit
 from app.services.quiz import AnswerView, question_options
 from app.services.tutor import CheckResult
-from app.textutil import LETTERS, esc, format_elapsed, format_stamp
+from app.textutil import LETTERS, esc, format_elapsed, format_stamp, model_html
 
 GRADE_PROMPT = "В каком вы классе? Нажмите цифру от 1 до 11."
 
@@ -55,21 +55,21 @@ def render_check(result: CheckResult) -> str:
         )
     lines: list[str] = []
     if result.subject:
-        lines.append(f"Предмет: {result.subject}")
+        lines.append(f"<b>Предмет:</b> {model_html(result.subject)}")
     if result.is_correct:
-        lines.append("Решение верное.")
+        lines.append("<b>Решение верное.</b>")
         if result.praise:
-            lines.append(result.praise)
+            lines.append(model_html(result.praise))
     else:
-        lines.append("В решении есть ошибка.")
+        lines.append("<b>В решении есть ошибка.</b>")
         if result.error_step:
-            lines.append("Шаг: " + result.error_step)
+            lines.append("<b>Шаг:</b> " + model_html(result.error_step))
         if result.hint:
-            lines.append(result.hint)
+            lines.append(model_html(result.hint))
         lines.append("Полный разбор откроется кнопкой «Показать решение».")
     if result.skill:
-        lines.append("Приём: " + result.skill)
-    return "\n\n".join(esc(line) for line in lines)
+        lines.append("<b>Приём:</b> " + model_html(result.skill))
+    return "\n\n".join(lines)
 
 
 def render_notes_page(notes: list[dict], page: int, total: int) -> str:
@@ -84,13 +84,13 @@ def render_notes_page(notes: list[dict], page: int, total: int) -> str:
 
 
 def render_note(note: dict) -> str:
-    lines = [note["title"]]
+    lines = [f"<b>{esc(note['title'])}</b>"]
     if note["subject"]:
-        lines.append(note["subject"])
-    lines.append(format_stamp(note["created_at"]))
+        lines.append(esc(note["subject"]))
+    lines.append(esc(format_stamp(note["created_at"])))
     lines.append("")
-    lines.append(note["body"])
-    return "\n".join(esc(line) for line in lines)
+    lines.append(model_html(note["body"]))
+    return "\n".join(lines)
 
 
 def render_search(query: str, hits: list[NoteHit]) -> str:
@@ -111,7 +111,7 @@ def render_search(query: str, hits: list[NoteHit]) -> str:
 def render_question(title: str, started_at: str, done: int, total: int, question: dict) -> str:
     options = json.loads(question["options_json"])
     lines = [
-        esc(f"Квиз «{title}»"),
+        f"<b>{esc(f'Квиз «{title}»')}</b>",
         esc(f"Закрыто {done} из {total} · прошло {format_elapsed(started_at)}"),
         "",
         esc(question["prompt"]),
@@ -125,19 +125,19 @@ def render_question(title: str, started_at: str, done: int, total: int, question
 
 def render_feedback(view: AnswerView) -> str:
     if view.correct:
-        text = "Верно, задача закрыта."
+        text = "<b>Верно, задача закрыта.</b>"
     else:
-        text = "Пока неверно. Задача вернётся в конец очереди."
+        text = "<b>Пока неверно.</b> Задача вернётся в конец очереди."
     if view.explanation:
-        text += " " + view.explanation
-    return esc(text)
+        text += " " + model_html(view.explanation)
+    return text
 
 
 def render_finished(view: AnswerView) -> str:
-    prefix = "Верно. " if view.correct else ""
-    return esc(
-        f"{prefix}Квиз «{view.quiz_title}» пройден. "
-        f"Закрыто {view.done} из {view.total} · прошло {view.elapsed}."
+    prefix = "<b>Верно.</b> " if view.correct else ""
+    return (
+        f"{prefix}Квиз <b>{esc(view.quiz_title)}</b> пройден. "
+        + esc(f"Закрыто {view.done} из {view.total} · прошло {view.elapsed}.")
     )
 
 

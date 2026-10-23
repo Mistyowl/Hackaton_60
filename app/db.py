@@ -7,7 +7,6 @@ import aiosqlite
 
 from app.textutil import MARK_START, utcnow
 
-CABINET_LINK_MINUTES = 15
 CABINET_SESSION_MINUTES = 45
 
 SCHEMA = """
@@ -233,49 +232,17 @@ class Database:
         row = await cursor.fetchone()
         return dict(row) if row else None
 
-    async def create_cabinet_link(self, user_id: int) -> str:
-        token = secrets.token_urlsafe(9)
-        await self.conn.execute(
-            """
-            INSERT INTO cabinet_links (token, user_id, expires_at)
-            VALUES (?, ?, ?)
-            """,
-            (token, user_id, _until(CABINET_LINK_MINUTES)),
-        )
-        await self.conn.commit()
-        return token
-
-    async def redeem_cabinet_link(self, token: str) -> str | None:
-        now = utcnow()
-        cursor = await self.conn.execute(
-            """
-            UPDATE cabinet_links
-            SET used_at = ?
-            WHERE token = ? AND used_at IS NULL AND expires_at > ?
-            """,
-            (now, token, now),
-        )
-        if cursor.rowcount != 1:
-            await self.conn.commit()
-            return None
-        found = await self.conn.execute(
-            "SELECT user_id FROM cabinet_links WHERE token = ?",
-            (token,),
-        )
-        row = await found.fetchone()
-        if row is None:
-            await self.conn.rollback()
-            return None
-        session = secrets.token_urlsafe(18)
+    async def create_cabinet_session(self, user_id: int) -> str:
+        token = secrets.token_urlsafe(18)
         await self.conn.execute(
             """
             INSERT INTO cabinet_sessions (token, user_id, expires_at)
             VALUES (?, ?, ?)
             """,
-            (session, int(row["user_id"]), _until(CABINET_SESSION_MINUTES)),
+            (token, user_id, _until(CABINET_SESSION_MINUTES)),
         )
         await self.conn.commit()
-        return session
+        return token
 
     async def cabinet_user(self, token: str) -> dict | None:
         if not token:

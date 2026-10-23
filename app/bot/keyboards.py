@@ -1,19 +1,52 @@
-from maxapi.types import CallbackButton, LinkButton
+from maxapi.types import CallbackButton, OpenAppButton
+from maxapi.types.attachments.buttons.attachment_button import AttachmentButton
 from maxapi.utils.inline_keyboard import InlineKeyboardBuilder
 
 from app.services.notes import NoteHit
 from app.textutil import LETTERS, button_label
 
 
-def _markup(*rows: list[CallbackButton]):
+def _markup(*rows: list):
     keyboard = InlineKeyboardBuilder()
     for row in rows:
         if row:
             keyboard.row(*row)
-    return keyboard.as_markup()
+    markup = keyboard.as_markup()
+    if any(isinstance(button, OpenAppButton) for row in rows for button in row):
+        return _compact(markup)
+    return markup
 
 
-def menu_keyboard(cabinet: bool = False):
+class _CompactMarkup(AttachmentButton):
+    """Клавиатура без пустых полей. Остаётся вложением, чтобы правка сообщения её приняла."""
+
+    def model_dump(self, *args, **kwargs):
+        source = object.__getattribute__(self, "_source")
+        return _without_empty(source.model_dump(*args, **kwargs))
+
+
+def _without_empty(value):
+    if isinstance(value, dict):
+        return {key: _without_empty(item) for key, item in value.items() if item is not None}
+    if isinstance(value, list):
+        return [_without_empty(item) for item in value]
+    return value
+
+
+def _compact(markup):
+    compact = _CompactMarkup(type=markup.type, payload=markup.payload)
+    object.__setattr__(compact, "_source", markup)
+    return compact
+
+
+def _cabinet_button(web_app: str = ""):
+    name = web_app.strip().lstrip("@")
+    if name:
+        return OpenAppButton(text="Кабинет", web_app=name)
+    return OpenAppButton(text="Кабинет")
+
+
+def menu_keyboard(cabinet: bool = False, web_app: str = ""):
     ask = [CallbackButton(text="💬 Спросить", payload="menu:ask")]
     notes = [CallbackButton(text="✍️ Свой конспект", payload="menu:own")]
     if not cabinet:
@@ -29,12 +62,15 @@ def menu_keyboard(cabinet: bool = False):
         ],
     ]
     if cabinet:
-        rows.append([CallbackButton(text="Кабинет", payload="menu:cabinet")])
+        rows.append([_cabinet_button(web_app)])
     return _markup(*rows)
 
 
-def cabinet_link_keyboard(url: str):
-    return _markup([LinkButton(text="Открыть", url=url)])
+def cabinet_keyboard(web_app: str = ""):
+    return _markup(
+        [_cabinet_button(web_app)],
+        [CallbackButton(text="🏠 Меню", payload="menu:home")],
+    )
 
 
 def back_keyboard():
