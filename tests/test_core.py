@@ -1,7 +1,7 @@
 import json
 import tempfile
 import unittest
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from httpx import ASGITransport, AsyncClient
@@ -13,7 +13,10 @@ from maxapi.types.updates.message_callback import MessageForCallback
 
 from app.bot.keyboards import cabinet_keyboard, grade_keyboard, menu_keyboard, style_keyboard
 from app.db import Database
+from app.services.limits import allow, reset
 from app.services.notes import onboard_step, register_check, save_manual, search_notes, student_dossier
+from app.services.reminders import in_quiet_hours, reminder_line
+from app.services.skills import brightness, next_box, record, sky_payload, star_position
 from app.services.quiz import answer_question
 from app.services.tutor import (
     CheckResult,
@@ -164,14 +167,20 @@ class FakeTutor:
         self.calls += 1
         return [note_id for note_id in self.ids if any(card["id"] == note_id for card in cards)]
 
-    async def make_quiz(self, topic: str | None, errors: list[dict] | None):
-        title = topic or "По моим ошибкам"
+    async def make_quiz(self, topic: str | None, errors: list[dict] | None, fallback: str | None = None, wanted: int = 6):
+        self.topic = topic
+        self.errors = errors
+        title = fallback or topic or "По моим ошибкам"
+        if title and len(title) > 80:
+            title = title.split("\n", 1)[0][:80]
         return title, [
             QuestionDraft(
                 prompt="Сколько будет 2+2?",
                 options=["3", "4"],
                 correct_index=1,
                 explanation="Четыре.",
+                skill="сложение",
+                subject="Математика",
             )
         ]
 
@@ -216,6 +225,34 @@ class DatabaseTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(await self.db.delete_note(1, note_id))
         self.assertEqual(await search_notes(self.db, FakeTutor(), 1, "знаменатель"), [])
         self.assertFalse(await self.db.delete_note(2, note_id))
+
+    async def test_update_note_refreshes_search(self) -> None:
+        note_id = await self.db.insert_note(1, "Дроби", "Математика", "Общий знаменатель.", "manual")
+        self.assertFalse(await self.db.update_note(2, note_id, "Чужое", "Физика", "нельзя"))
+        original = await self.db.get_note(1, note_id)
+        assert original is not None
+        self.assertEqual(original["title"], "Дроби")
+        self.assertTrue(await self.db.update_note(1, note_id, "Проценты", "Алгебра", "Часть от числа."))
+        note = await self.db.get_note(1, note_id)
+        assert note is not None
+        self.assertEqual(note["title"], "Проценты")
+        self.assertEqual(note["subject"], "Алгебра")
+        self.assertEqual(note["body"], "Часть от числа.")
+        self.assertEqual(await search_notes(self.db, FakeTutor(), 1, "знаменатель"), [])
+        hits = await search_notes(self.db, FakeTutor(), 1, "числа")
+        self.assertEqual([hit.id for hit in hits], [note_id])
+
+    async def test_pinned_notes_stay_above_newer_ones(self) -> None:
+        older = await self.db.insert_note(1, "Дроби", "Математика", "Общий знаменатель.", "manual")
+        newer = await self.db.insert_note(1, "Проценты", "Математика", "Находим часть от числа.", "manual")
+        self.assertEqual([row["id"] for row in await self.db.list_notes(1, 0, 10)], [newer, older])
+        self.assertTrue(await self.db.set_note_pinned(1, older, True))
+        self.assertFalse(await self.db.set_note_pinned(2, older, True))
+        listed = await self.db.list_notes(1, 0, 10)
+        self.assertEqual([row["id"] for row in listed], [older, newer])
+        self.assertEqual([bool(row["pinned"]) for row in listed], [True, False])
+        self.assertTrue(await self.db.set_note_pinned(1, older, False))
+        self.assertEqual([row["id"] for row in await self.db.list_notes(1, 0, 10)], [newer, older])
 
     async def test_semantic_fallback_uses_only_own_notes(self) -> None:
         note_id = await self.db.insert_note(
@@ -387,7 +424,7 @@ class DatabaseTests(unittest.IsolatedAsyncioTestCase):
             health = await client.get("/health")
             self.assertEqual(health.status_code, 200)
             page = await client.get("/")
-            self.assertIn("<mark>", page.text)
+            self.assertIn("Личный кабинет", page.text)
             self.assertIn("Откройте кабинет кнопкой в чате MAX", page.text)
             self.assertIn("https://st.max.ru/js/max-web-app.js", page.text)
             self.assertNotIn("Боря", page.text)
@@ -483,7 +520,7 @@ class DatabaseTests(unittest.IsolatedAsyncioTestCase):
         transport = ASGITransport(app=app)
         async with AsyncClient(transport=transport, base_url="https://cabinet") as anon:
             page = await anon.get("/")
-            self.assertIn("Удалить", page.text)
+            self.assertIn("Личный кабинет", page.text)
             self.assertEqual((await anon.delete(f"/api/notes/{own}")).status_code, 401)
             self.assertIsNotNone(await self.db.get_note(1, own))
         async with AsyncClient(transport=transport, base_url="https://cabinet") as owner:
@@ -501,6 +538,57 @@ class DatabaseTests(unittest.IsolatedAsyncioTestCase):
             blocked = await stranger.delete(f"/api/notes/{kept}")
             self.assertEqual(blocked.status_code, 404)
             self.assertIsNotNone(await self.db.get_note(1, kept))
+
+    async def test_cabinet_edit_belongs_to_the_session(self) -> None:
+        own = await self.db.insert_note(1, "Свой конспект", "Математика", "только Аня", "manual")
+        await self.db.set_note_pinned(1, own, True)
+        foreign = await self.db.insert_note(2, "Чужой конспект", "Физика", "только Боря", "manual")
+        app = create_app(self.db, FakeTutor(), BOT_TOKEN)
+        transport = ASGITransport(app=app)
+        edited = {
+            "title": "Новый заголовок",
+            "subject": "Алгебра",
+            "body": "Общий знаменатель больше не нужен.",
+        }
+        async with AsyncClient(transport=transport, base_url="https://cabinet") as anon:
+            page = await anon.get("/")
+            self.assertIn('id="edit-note"', page.text)
+            self.assertIn("Редактировать конспект", page.text)
+            self.assertEqual((await anon.put(f"/api/notes/{own}", json=edited)).status_code, 401)
+            stored = await self.db.get_note(1, own)
+            assert stored is not None
+            self.assertEqual(stored["title"], "Свой конспект")
+        async with AsyncClient(transport=transport, base_url="https://cabinet") as owner:
+            opened = await owner.post("/api/session", json={"init_data": _init_data(1, "Аня")})
+            self.assertEqual(opened.status_code, 200)
+            missed = await owner.put(f"/api/notes/{foreign}", json=edited)
+            self.assertEqual(missed.status_code, 404)
+            foreign_note = await self.db.get_note(2, foreign)
+            assert foreign_note is not None
+            self.assertEqual(foreign_note["body"], "только Боря")
+            empty = await owner.put(
+                f"/api/notes/{own}",
+                json={"title": "  ", "subject": "Алгебра", "body": "текст"},
+            )
+            self.assertEqual(empty.status_code, 400)
+            saved = await owner.put(f"/api/notes/{own}", json=edited)
+            self.assertEqual(saved.status_code, 200)
+            self.assertEqual(saved.json()["title"], "Новый заголовок")
+            self.assertEqual(saved.json()["body"], edited["body"])
+            note = await self.db.get_note(1, own)
+            assert note is not None
+            self.assertEqual(note["subject"], "Алгебра")
+            listed = await self.db.list_notes(1, 0, 10)
+            self.assertTrue(listed[0]["pinned"])
+            hits = await search_notes(self.db, FakeTutor(), 1, "знаменатель")
+            self.assertEqual([hit.id for hit in hits], [own])
+        async with AsyncClient(transport=transport, base_url="https://cabinet") as stranger:
+            await stranger.post("/api/session", json={"init_data": _init_data(2, "Боря")})
+            blocked = await stranger.put(f"/api/notes/{own}", json=edited)
+            self.assertEqual(blocked.status_code, 404)
+            kept = await self.db.get_note(1, own)
+            assert kept is not None
+            self.assertEqual(kept["title"], "Новый заголовок")
 
     async def test_cabinet_rejects_user_outside_allowlist(self) -> None:
         allowed = {11, 22, 33}
@@ -524,6 +612,49 @@ class DatabaseTests(unittest.IsolatedAsyncioTestCase):
             profile = await stranger.get("/api/profile")
             self.assertEqual(profile.status_code, 403)
             self.assertIn("участников теста", profile.text)
+
+    async def test_cabinet_profile_keeps_the_saved_name(self) -> None:
+        await self.db.set_grade(1, 7)
+        await self.db.set_explain_style(1, "detail")
+        await self.db.upsert_user(3, "")
+        await self.db.upsert_user(3, "Кира")
+        self.assertEqual((await self.db.get_user(3))["first_name"], "Кира")
+        await self.db.upsert_user(3, "Другое")
+        self.assertEqual((await self.db.get_user(3))["first_name"], "Кира")
+        app = create_app(self.db, FakeTutor(), BOT_TOKEN)
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="https://cabinet") as anon:
+            denied = await anon.patch(
+                "/api/profile",
+                json={"first_name": "Саша", "grade": 6},
+            )
+            self.assertEqual(denied.status_code, 401)
+        async with AsyncClient(transport=transport, base_url="https://cabinet") as client:
+            opened = await client.post("/api/session", json={"init_data": _init_data(1, "Аня")})
+            self.assertEqual(opened.status_code, 200)
+            missing = await client.patch("/api/profile", json={"first_name": "   ", "grade": 6})
+            self.assertEqual(missing.status_code, 400)
+            bad_grade = await client.patch("/api/profile", json={"first_name": "Саша", "grade": 4})
+            self.assertEqual(bad_grade.status_code, 400)
+            flagged = await client.patch("/api/profile", json={"first_name": "Саша", "grade": True})
+            self.assertEqual(flagged.status_code, 400)
+            saved = await client.patch(
+                "/api/profile",
+                json={"first_name": "  Саша  ", "grade": 6},
+            )
+            self.assertEqual(saved.status_code, 200)
+            self.assertEqual(saved.json()["first_name"], "Саша")
+            self.assertEqual(saved.json()["grade"], 6)
+            self.assertEqual(saved.json()["explain_style"], "detail")
+            profile = await client.get("/api/profile")
+            self.assertEqual(profile.json()["first_name"], "Саша")
+            self.assertEqual(profile.json()["grade"], 6)
+        async with AsyncClient(transport=transport, base_url="https://cabinet") as again:
+            opened = await again.post("/api/session", json={"init_data": _init_data(1, "Макс")})
+            self.assertEqual(opened.status_code, 200)
+            profile = await again.get("/api/profile")
+            self.assertEqual(profile.json()["first_name"], "Саша")
+            self.assertEqual(profile.json()["grade"], 6)
 
     async def test_dossier_uses_only_this_student(self) -> None:
         await self.db.upsert_user(3, "")
@@ -652,6 +783,107 @@ class DatabaseTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(counts, [2, 1])
         await self.db.set_explain_style(1, "short")
         self.assertIsNone(onboard_step(await self.db.get_user(1)))
+
+
+class SkillTests(unittest.TestCase):
+    def test_box_and_brightness(self) -> None:
+        self.assertEqual(next_box(1, True), 2)
+        self.assertEqual(next_box(5, True), 5)
+        self.assertEqual(next_box(4, False), 1)
+        now = datetime(2026, 10, 25, 12, tzinfo=timezone.utc)
+        seen = (now - timedelta(days=2)).isoformat()
+        fresh = brightness(1.0, 5, now.isoformat(), now)
+        faded = brightness(1.0, 1, seen, now)
+        self.assertGreater(fresh, 0.9)
+        self.assertLess(faded, fresh)
+        self.assertEqual(star_position(7), star_position(7))
+
+    def test_reminder_words(self) -> None:
+        self.assertIn("1 звезда", reminder_line(1))
+        self.assertIn("2 звезды", reminder_line(2))
+        self.assertIn("5 звёзд", reminder_line(5))
+        noon = datetime(2026, 10, 25, 12, tzinfo=timezone.utc)
+        night = noon.replace(hour=23)
+        self.assertFalse(in_quiet_hours(noon))
+        self.assertTrue(in_quiet_hours(night))
+
+    def test_rate_limit(self) -> None:
+        reset()
+        self.assertTrue(all(allow(5, now=float(index)) for index in range(30)))
+        self.assertFalse(allow(5, now=31))
+        reset()
+
+
+class SkyTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.db = Database(str(Path(self._tmp.name) / "tutor.db"))
+        await self.db.connect()
+        await self.db.upsert_user(1, "Аня")
+
+    async def asyncTearDown(self) -> None:
+        await self.db.close()
+        self._tmp.cleanup()
+
+    async def test_practice_closes_the_error(self) -> None:
+        wrong = CheckResult(
+            is_schoolwork=True,
+            subject="Алгебра",
+            problem_text="2x = 4",
+            student_solution_text="x = 4",
+            is_correct=False,
+            error_step="не разделил",
+            hint="Раздели обе части.",
+            full_explanation="x = 2",
+            skill="деление обеих частей",
+            praise="",
+        )
+        await register_check(self.db, 1, wrong)
+        self.assertEqual(await self.db.count_errors(1), 1)
+        await record(self.db, 1, "Алгебра", "деление обеих частей", True, "quiz")
+        self.assertEqual(await self.db.count_errors(1), 1)
+        await record(self.db, 1, "Алгебра", "деление обеих частей", True, "quiz")
+        self.assertEqual(await self.db.count_errors(1), 0)
+
+    async def test_sky_and_note_quiz(self) -> None:
+        now = datetime.now(timezone.utc)
+        seen = (now - timedelta(days=10)).isoformat(timespec="seconds")
+        due = (now - timedelta(days=1)).isoformat(timespec="seconds")
+        skill_id = await self.db.insert_skill(1, "Алгебра", "линейные уравнения", 0.2, 1, seen, due)
+        note_id = await self.db.insert_note(
+            1,
+            "Дроби",
+            "Математика",
+            "Общий знаменатель важен.",
+            "manual",
+        )
+        payload = sky_payload(await self.db.list_skills(1), now)
+        self.assertEqual(payload["summary"]["total"], 1)
+        self.assertEqual(payload["summary"]["dim"], 1)
+        self.assertEqual(payload["constellations"][0]["stars"][0]["id"], skill_id)
+        tutor = FakeTutor()
+        app = create_app(self.db, tutor, BOT_TOKEN)
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="https://cabinet") as client:
+            self.assertEqual((await client.get("/api/sky")).status_code, 401)
+            await client.post("/api/session", json={"init_data": _init_data(1, "Аня")})
+            sky = await client.get("/api/sky")
+            self.assertEqual(sky.status_code, 200)
+            self.assertEqual(sky.json()["summary"]["dim"], 1)
+            detail = await client.get(f"/api/skills/{skill_id}")
+            self.assertEqual(detail.status_code, 200)
+            self.assertEqual(detail.json()["name"], "линейные уравнения")
+            self.assertEqual((await client.get("/api/skills/999")).status_code, 404)
+            review = await client.post("/api/quizzes/review", json={})
+            self.assertEqual(review.status_code, 200)
+            self.assertEqual(review.json()["skill_ids"], [skill_id])
+            self.assertNotIn("correct_index", review.text)
+            started = await client.post(f"/api/quizzes/note/{note_id}")
+            self.assertEqual(started.status_code, 200)
+            self.assertEqual(started.json()["title"], "Дроби")
+            self.assertIn("Общий знаменатель", tutor.topic)
+            foreign = await self.db.insert_note(2, "Чужое", "Физика", "скрыто", "chat")
+            self.assertEqual((await client.post(f"/api/quizzes/note/{foreign}")).status_code, 404)
 
 
 class WebAppTests(unittest.TestCase):

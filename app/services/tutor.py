@@ -48,6 +48,7 @@ class CheckResult:
     full_explanation: str
     skill: str
     praise: str
+    star_line: str = ""
 
 
 @dataclass
@@ -56,6 +57,8 @@ class QuestionDraft:
     options: list[str]
     correct_index: int
     explanation: str
+    skill: str = ""
+    subject: str = ""
 
 
 class _TutorSchema(BaseModel):
@@ -84,6 +87,8 @@ class _QuestionSchema(BaseModel):
     options: list[str]
     correct_index: int
     explanation: str = ""
+    skill: str = ""
+    subject: str = ""
 
 
 class _QuizSchema(BaseModel):
@@ -95,12 +100,22 @@ class _SearchSchema(BaseModel):
     note_ids: list[int] = Field(default_factory=list)
 
 
+class _SkillMatchSchema(BaseModel):
+    id: int = 0
+    name: str = ""
+
+
 def load_prompt(name: str) -> str:
     return (PROMPTS / name).read_text(encoding="utf-8").strip()
 
 
-def normalize_quiz(pack: _QuizSchema, fallback_title: str) -> tuple[str, list[QuestionDraft]]:
+def normalize_quiz(
+    pack: _QuizSchema,
+    fallback_title: str,
+    wanted: int = 6,
+) -> tuple[str, list[QuestionDraft]]:
     drafts: list[QuestionDraft] = []
+    minimum = 4 if wanted >= 6 else 3
     for question in pack.questions:
         options = [option.strip() for option in question.options if option and option.strip()]
         if len(options) < 4:
@@ -117,11 +132,13 @@ def normalize_quiz(pack: _QuizSchema, fallback_title: str) -> tuple[str, list[Qu
                 options=options,
                 correct_index=question.correct_index,
                 explanation=question.explanation.strip() or "Разберите приём ещё раз.",
+                skill=question.skill.strip()[:80],
+                subject=question.subject.strip()[:80],
             )
         )
-        if len(drafts) == 6:
+        if len(drafts) == wanted:
             break
-    if len(drafts) < 4:
+    if len(drafts) < minimum:
         raise TutorError("Модель собрала квиз не полностью. Попросите тему ещё раз.")
     title = pack.title.strip() or fallback_title
     return title[:120], drafts
@@ -334,14 +351,18 @@ class Tutor:
         self,
         topic: str | None,
         errors: list[dict] | None,
+        fallback: str | None = None,
+        wanted: int = 6,
     ) -> tuple[str, list[QuestionDraft]]:
         if errors:
             packed = json.dumps(errors, ensure_ascii=False)
             user_text = "Собери квиз по этим ошибкам ученика. Задачи должны быть новыми.\n" + packed[:5000]
-            fallback = "По моим ошибкам"
+            title = fallback or "По моим ошибкам"
         else:
             user_text = "Тема квиза: " + (topic or "школьная математика")
-            fallback = topic or "Квиз"
+            title = fallback or topic or "Квиз"
+        if wanted < 6:
+            user_text += f"\nНужно вопросов: {wanted}."
         last_error: Exception | None = None
         for _ in range(2):
             try:
@@ -351,12 +372,25 @@ class Tutor:
                     _QuizSchema,
                     0.6,
                 )
-                return normalize_quiz(data, fallback)
+                return normalize_quiz(data, title[:120], wanted)
             except TutorError as error:
                 if "GEMINI_API_KEY" in error.user_message:
                     raise
                 last_error = error
         raise TutorError("Не получилось собрать квиз. Назовите тему ещё раз.") from last_error
+
+    async def match_skill(self, raw: str, known: list[dict]) -> tuple[int, str] | None:
+        catalog = [{"id": item["id"], "name": item["name"], "subject": item["subject"]} for item in known]
+        user_text = (
+            f"Приём: {raw}\nНавыки:\n" + json.dumps(catalog, ensure_ascii=False)[:4000]
+        )
+        data = await self._ask(
+            load_prompt("skill.txt"),
+            self._text_contents([], user_text),
+            _SkillMatchSchema,
+            0.1,
+        )
+        return int(data.id), data.name.strip()
 
     async def pick_notes(self, query: str, cards: list[dict]) -> list[int]:
         if not cards:

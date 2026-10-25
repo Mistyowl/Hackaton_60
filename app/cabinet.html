@@ -3,638 +3,295 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Кабинет</title>
-  <style>
-    :root {
-      color-scheme: dark;
-      --bg: #160d33;
-      --card: #2a1b55;
-      --ink: #ffffff;
-      --muted: #b7a6d6;
-      --accent: #7b4dff;
-      --icon: #3a2774;
-      --danger: #e23b3b;
-    }
-    * { box-sizing: border-box; }
-    body {
-      margin: 0;
-      font-family: "Segoe UI", sans-serif;
-      background: var(--bg);
-      color: var(--ink);
-    }
-    main {
-      max-width: 440px;
-      margin: 0 auto;
-      padding: 22px 16px 64px;
-    }
-    .hero {
-      display: flex;
-      align-items: flex-start;
-      justify-content: space-between;
-      gap: 12px;
-    }
-    h1 {
-      margin: 0;
-      font-size: 34px;
-      font-weight: 700;
-      letter-spacing: -0.03em;
-    }
-    .mascot { width: 96px; height: 96px; flex: none; object-fit: contain; }
-    p.lead { margin: 8px 0 0; color: var(--muted); line-height: 1.4; }
-    input, button { font: inherit; color: inherit; }
-    .search {
-      display: flex;
-      gap: 8px;
-      margin-top: 18px;
-    }
-    .search input {
-      flex: 1;
-      min-width: 0;
-      border: 0;
-      background: #241447;
-      border-radius: 14px;
-      padding: 12px 14px;
-    }
-    .search input::placeholder { color: #8d7aaf; }
-    button {
-      border: 0;
-      background: var(--accent);
-      color: white;
-      border-radius: 14px;
-      padding: 12px 16px;
-      cursor: pointer;
-    }
-    button:disabled { opacity: 0.6; cursor: default; }
-    section { margin-top: 26px; }
-    .section-head {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      margin-bottom: 12px;
-    }
-    h2 { font-size: 22px; margin: 0; }
-    #results-title { margin-bottom: 12px; }
-    button.link {
-      background: transparent;
-      color: var(--muted);
-      padding: 0;
-      font-size: 16px;
-    }
-    .swipe {
-      position: relative;
-      margin-bottom: 10px;
-      border-radius: 18px;
-      overflow: hidden;
-    }
-    .trash {
-      position: absolute;
-      top: 0;
-      right: 0;
-      bottom: 0;
-      width: 72px;
-      border-radius: 0;
-      background: var(--danger);
-      display: grid;
-      place-items: center;
-    }
-    .face {
-      position: relative;
-      background: var(--card);
-      border-radius: 18px;
-      transition: transform 0.18s ease;
-      touch-action: pan-y;
-    }
-    .swipe.open-swipe .face { transform: translateX(-72px); }
-    .card {
-      display: grid;
-      grid-template-columns: 44px 1fr 16px;
-      gap: 12px;
-      align-items: center;
-      padding: 14px;
-    }
-    .icon {
-      width: 44px;
-      height: 44px;
-      border-radius: 14px;
-      background: var(--icon);
-      display: grid;
-      place-items: center;
-      color: #d7c8ff;
-    }
-    .glyph { font-size: 22px; line-height: 1; }
-    .card h3 { margin: 0 0 2px; font-size: 16px; font-weight: 650; }
-    .meta { color: var(--muted); font-size: 13px; }
-    .snippet {
-      margin-top: 8px;
-      line-height: 1.45;
-      white-space: pre-wrap;
-      color: #efe8ff;
-    }
-    .chev { color: var(--muted); font-size: 22px; line-height: 1; }
-    mark {
-      background: transparent;
-      color: inherit;
-      text-decoration: underline;
-      text-underline-offset: 2px;
-    }
-    .badge { display: inline-block; margin-top: 8px; font-size: 12px; color: #c4b0ff; }
-    .empty, #quiz-status { color: var(--muted); }
-    .error { color: #ffb4b4; }
-    #quiz-actions { display: flex; flex-wrap: wrap; gap: 8px; }
-    #quiz-actions input {
-      flex: 1;
-      min-width: 140px;
-      border: 0;
-      background: #241447;
-      border-radius: 14px;
-      padding: 12px 14px;
-    }
-    #quiz-play { margin-top: 14px; }
-    #quiz-play h3 { margin: 0 0 6px; }
-    #quiz-play .options button {
-      display: block;
-      width: 100%;
-      margin-top: 8px;
-      text-align: left;
-      background: var(--card);
-      color: var(--ink);
-    }
-    .feedback { margin: 0 0 10px; line-height: 1.45; }
-    .feedback.ok { color: #b7f0c8; }
-    .feedback.bad { color: #ffb4b4; }
-  </style>
+  <title>Личный кабинет</title>
+  <link rel="stylesheet" href="/static/cabinet.css">
 </head>
 <body>
   <main>
-    <header class="hero">
-      <div>
-        <h1>Кабинет</h1>
-        <p id="who" class="lead" hidden></p>
-      </div>
-      <img class="mascot" src="/assets/lumi-mark.png" alt="">
-    </header>
-    <p id="gate" class="lead">Откройте кабинет кнопкой в чате MAX.</p>
+    <p id="gate" class="gate">Откройте кабинет кнопкой в чате MAX.</p>
     <div id="cabinet" hidden>
-      <form id="search-form" class="search">
-        <input id="query" type="search" placeholder="Слово или фраза" autocomplete="off">
-        <button type="submit">Найти</button>
-      </form>
-      <section>
-        <h2 id="results-title" hidden>Результаты поиска</h2>
-        <div id="results"></div>
+      <section data-screen="sky">
+        <div class="sky-screen">
+          <header class="top">
+            <div>
+              <div class="kicker">Карта знаний</div>
+              <h1 class="home-title">Созвездие</h1>
+            </div>
+            <img class="mascot" src="/assets/lumi-mark.png" alt="">
+          </header>
+          <p class="sub" id="sky-summary">Каждый навык — звезда. Тусклая значит, что тему пора повторить.</p>
+          <div class="sky-legend">
+            <span><i class="legend-dot bright"></i> горит</span>
+            <span><i class="legend-dot dim"></i> пора повторить</span>
+          </div>
+          <div id="sky-empty" class="empty-card" hidden>
+            <img class="mascot" src="/static/lumi-think.svg" alt="">
+            <p>Пришли первую задачу, и зажжётся первая звезда.</p>
+          </div>
+          <div class="sky-canvas" id="sky-canvas"></div>
+          <button type="button" class="primary" id="ignite" hidden>Зажечь тусклые звёзды</button>
+          <button type="button" class="ghost" id="share-sky">Поделиться небом</button>
+          <p class="status" id="sky-status"></p>
+        </div>
       </section>
-      <section>
+
+      <section data-screen="home" hidden>
+        <header class="top">
+          <h1 class="home-title">Личный кабинет</h1>
+        </header>
+        <article class="profile-card">
+          <div class="profile-main">
+            <div class="profile-label">
+              <span class="eyebrow">Твой профиль</span>
+              <button type="button" class="mini" id="open-profile" aria-label="Редактировать профиль">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4 12.5-12.5z"/></svg>
+              </button>
+            </div>
+            <span class="profile-name" id="home-name">Ученик</span>
+            <span class="chip" id="home-grade-text">Класс</span>
+          </div>
+          <img class="mascot" src="/assets/lumi-mark.png" alt="">
+        </article>
+        <button type="button" class="sky-entry" id="open-sky">
+          <span class="bubble"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 3l1.6 4.6L18 9l-4.4 1.4L12 15l-1.6-4.6L6 9l4.4-1.4L12 3z"/></svg></span>
+          <span class="copy">
+            <strong>Созвездие знаний</strong>
+            <span class="hint" id="home-sky-line">Открой небо своих навыков</span>
+          </span>
+          <span class="chev"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 6l6 6-6 6"/></svg></span>
+        </button>
+        <h2>Квизы</h2>
+        <div class="pair">
+          <button type="button" class="tile soft" id="open-topic">
+            <span class="bubble"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg></span>
+            <h3>Квиз по конспектам</h3>
+            <p>Проверь, что запомнил</p>
+          </button>
+          <button type="button" class="tile peach" id="open-errors">
+            <span class="bubble"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 8v5"/><path d="M12 16h.01"/><circle cx="12" cy="12" r="9"/></svg></span>
+            <h3>Квиз по ошибкам</h3>
+            <p>Вернись к сложным задачам</p>
+          </button>
+        </div>
         <div class="section-head">
           <h2>Конспекты</h2>
-          <button type="button" class="link" id="show-all" hidden>Все &gt;</button>
+          <button type="button" class="link" id="show-all" hidden>Все</button>
         </div>
-        <div id="notes"></div>
+        <p class="hint-banner" id="swipe-hint" hidden>Смахни вправо, чтобы закрепить, влево — чтобы удалить.</p>
+        <div id="home-notes"></div>
+        <button type="button" class="banner soft" id="ask-chat">
+          <span class="bubble"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 3l1.2 4.2L17.5 8.5 13.2 9.8 12 14l-1.2-4.2L6.5 8.5l4.3-1.3L12 3z"/></svg></span>
+          <div>
+            <strong>Сложная задача?</strong>
+            <p>Отправь фото в чат — Люми поможет разобраться.</p>
+          </div>
+        </button>
       </section>
-      <section>
-        <h2>Квиз</h2>
-        <div id="quiz-actions">
-          <button type="button" id="quiz-errors">По ошибкам</button>
-          <input id="quiz-topic" type="text" placeholder="Тема, например: дроби" autocomplete="off">
-          <button type="button" id="quiz-by-topic">По теме</button>
+
+      <section data-screen="notes" hidden>
+        <div class="screen-head">
+          <button type="button" class="back" data-back="home" aria-label="Назад"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M15 18l-6-6 6-6"/></svg></button>
+          <h1>Конспекты</h1>
         </div>
-        <p id="quiz-status" class="empty"></p>
-        <div id="quiz-play" hidden></div>
+        <p class="sub">Все сохранённые темы — в одном месте.</p>
+        <label class="control search">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3-3"/></svg>
+          <input id="search-input" placeholder="Поиск по конспектам" autocomplete="off">
+        </label>
+        <div id="search-hits"></div>
+        <h2>Твои темы</h2>
+        <div id="notes-list"></div>
+      </section>
+
+      <section data-screen="note" hidden>
+        <div class="screen-head">
+          <button type="button" class="back" data-back="return" aria-label="Назад"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M15 18l-6-6 6-6"/></svg></button>
+          <h1 id="note-title">Конспект</h1>
+        </div>
+        <p class="sub" id="note-meta"></p>
+        <div class="note-panel">
+          <div class="note-panel-head">
+            <span class="eyebrow">Текст</span>
+            <button type="button" class="mini" id="edit-note" aria-label="Редактировать конспект">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4 12.5-12.5z"/></svg>
+            </button>
+          </div>
+          <div class="note-body" id="note-body"></div>
+          <form id="note-form" hidden>
+            <textarea id="note-body-input" maxlength="20000" aria-label="Текст конспекта"></textarea>
+            <div class="form-actions">
+              <button type="button" id="cancel-note">Отмена</button>
+              <button type="submit" class="primary" id="save-note">Сохранить</button>
+            </div>
+            <p class="status" id="note-status"></p>
+          </form>
+        </div>
+      </section>
+
+      <section data-screen="profile" hidden>
+        <div class="screen-head">
+          <button type="button" class="back" data-back="home" aria-label="Назад"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M15 18l-6-6 6-6"/></svg></button>
+          <h1>Профиль</h1>
+        </div>
+        <p class="sub">Данные ученика.</p>
+        <div class="summary">
+          <img class="mascot" src="/assets/lumi-mark.png" alt="">
+          <div>
+            <strong id="preview-name">Ученик</strong>
+            <div class="meta" id="preview-meta">Ученик</div>
+          </div>
+        </div>
+        <form id="profile-form">
+          <label class="field">Имя
+            <span class="control"><input id="name-input" name="first_name" maxlength="128" autocomplete="name"></span>
+          </label>
+          <div class="field">Класс
+            <div class="grade-picker">
+              <input id="grade-input" type="hidden" name="grade" value="">
+              <button type="button" class="control grade-toggle" id="grade-toggle" aria-haspopup="listbox" aria-expanded="false" aria-controls="grade-menu">
+                <span id="grade-label">Выбери класс</span>
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 9l6 6 6-6"/></svg>
+              </button>
+              <ul class="grade-menu" id="grade-menu" role="listbox" hidden>
+                <li><button type="button" role="option" data-grade="5">5 класс</button></li>
+                <li><button type="button" role="option" data-grade="6">6 класс</button></li>
+                <li><button type="button" role="option" data-grade="7">7 класс</button></li>
+                <li><button type="button" role="option" data-grade="8">8 класс</button></li>
+                <li><button type="button" role="option" data-grade="9">9 класс</button></li>
+                <li><button type="button" role="option" data-grade="10">10 класс</button></li>
+                <li><button type="button" role="option" data-grade="11">11 класс</button></li>
+              </ul>
+            </div>
+          </div>
+          <div class="field">Как объяснять
+            <div class="style-picks">
+              <button type="button" data-style="short">Короче</button>
+              <button type="button" data-style="detail">Подробнее</button>
+            </div>
+          </div>
+          <label class="check"><input type="checkbox" id="reminders-input"> Напоминать про тусклые звёзды</label>
+          <button type="submit" class="primary" id="save-profile">Сохранить</button>
+          <p class="status" id="save-status"></p>
+        </form>
+      </section>
+
+      <section data-screen="quiz" hidden>
+        <header class="top"><h1 class="home-title">Квизы</h1></header>
+        <p class="sub">Выбери, как хочешь потренироваться.</p>
+        <div class="quiz-menu">
+          <button type="button" class="choice soft" id="menu-topic">
+            <span class="bubble"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg></span>
+            <span><strong>Квиз по конспектам</strong><span class="hint">Проверь, что запомнил</span></span>
+            <span class="chev"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 6l6 6-6 6"/></svg></span>
+          </button>
+          <button type="button" class="choice peach" id="menu-errors">
+            <span class="bubble"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 8v5"/><path d="M12 16h.01"/><circle cx="12" cy="12" r="9"/></svg></span>
+            <span><strong>Квиз по ошибкам</strong><span class="hint">Вернись к сложным задачам</span></span>
+            <span class="chev"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 6l6 6-6 6"/></svg></span>
+          </button>
+        </div>
+      </section>
+
+      <section data-screen="quiz-topic" hidden>
+        <div class="screen-head">
+          <button type="button" class="back" data-back="quiz-return" aria-label="Назад"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M15 18l-6-6 6-6"/></svg></button>
+          <div><div class="kicker">Квиз по конспектам</div><h1>Выбери тему</h1></div>
+        </div>
+        <p class="sub">Квиз соберётся по тексту выбранного конспекта.</p>
+        <div id="topic-list"></div>
+        <button type="button" class="primary" id="start-topic" disabled>Начать квиз</button>
+        <p class="status" id="topic-status"></p>
+      </section>
+
+      <section data-screen="quiz-errors" hidden>
+        <div class="screen-head">
+          <button type="button" class="back" data-back="quiz-return" aria-label="Назад"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M15 18l-6-6 6-6"/></svg></button>
+          <div><div class="kicker">Тренировка</div><h1>Квиз по ошибкам</h1></div>
+        </div>
+        <p class="sub">Повтори темы, в которых раньше было сложнее.</p>
+        <h2 id="error-heading">Темы для повтора</h2>
+        <div id="error-list"></div>
+        <button type="button" class="primary" id="start-errors" disabled>Начать квиз</button>
+        <p class="status" id="error-status"></p>
+      </section>
+
+      <section data-screen="quiz-loading" hidden>
+        <div class="prompt">
+          <img class="mascot pulse" src="/static/lumi-think.svg" alt="">
+          <p>Собираю квиз</p>
+        </div>
+      </section>
+
+      <section data-screen="quiz-play" hidden>
+        <div class="screen-head">
+          <button type="button" class="back" data-back="quiz-origin" aria-label="Назад"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M15 18l-6-6 6-6"/></svg></button>
+          <div>
+            <div class="kicker" id="quiz-kicker">Квиз по конспектам</div>
+            <h1 id="quiz-title">Квиз</h1>
+          </div>
+        </div>
+        <div id="quiz-live">
+          <p class="progress" id="quiz-progress" hidden>Вопрос 1 из 6</p>
+          <div class="bar" id="quiz-bar" hidden><span id="quiz-bar-fill"></span></div>
+          <div class="prompt" id="quiz-card"></div>
+          <h2 class="answers-title" id="quiz-answers-title">Выбери ответ</h2>
+          <div id="quiz-options"></div>
+          <p class="feedback" id="quiz-feedback" hidden></p>
+        </div>
+        <div id="quiz-results" class="results" hidden>
+          <img class="mascot" id="result-mascot" src="/static/lumi-happy.svg" alt="">
+          <h2 id="result-title">Квиз пройден</h2>
+          <p class="sub" id="result-score"></p>
+          <p class="feedback" id="result-star" hidden></p>
+          <div id="result-misses"></div>
+          <button type="button" class="primary" id="quiz-again">Ещё раз</button>
+          <button type="button" class="ghost" id="quiz-retry" hidden>Повторить ошибки</button>
+          <button type="button" class="ghost" id="quiz-sky">На небо</button>
+        </div>
+        <button type="button" class="primary" id="quiz-go" disabled>Проверить ответ</button>
+        <p class="status" id="quiz-status"></p>
       </section>
     </div>
   </main>
+  <nav id="tabs" class="tabs" hidden aria-label="Разделы">
+    <button type="button" data-tab="sky">
+      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 3l1.6 4.6L18 9l-4.4 1.4L12 15l-1.6-4.6L6 9l4.4-1.4L12 3z"/></svg>
+      Звёзды
+    </button>
+    <button type="button" data-tab="home">
+      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
+      Кабинет
+    </button>
+    <button type="button" data-tab="notes">
+      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>
+      Конспекты
+    </button>
+    <button type="button" data-tab="quiz">
+      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="9"/><path d="M9 9a3 3 0 1 1 4 3c-.8.6-1 1-1 2"/><path d="M12 17h.01"/></svg>
+      Квиз
+    </button>
+  </nav>
+  <div id="confirm-delete" class="confirm" hidden>
+    <div class="confirm-card" role="dialog" aria-modal="true" aria-labelledby="confirm-title">
+      <h2 id="confirm-title">Удалить конспект?</h2>
+      <p id="confirm-text"></p>
+      <div class="confirm-actions">
+        <button type="button" id="confirm-cancel">Оставить</button>
+        <button type="button" class="danger" id="confirm-ok">Удалить</button>
+      </div>
+    </div>
+  </div>
+  <div id="star-sheet" class="sheet" hidden>
+    <div class="sheet-card">
+      <h2 id="star-name">Звезда</h2>
+      <p id="star-meta"></p>
+      <div id="star-notes"></div>
+      <button type="button" class="primary" id="star-train">Зажечь (3 вопроса)</button>
+      <button type="button" class="ghost" id="star-note" hidden>Открыть конспект</button>
+      <button type="button" class="ghost" id="star-close">Закрыть</button>
+    </div>
+  </div>
   <script src="https://st.max.ru/js/max-web-app.js"></script>
-  <script>
-    const LOCKED = "Откройте кабинет кнопкой в чате MAX.";
-    const notesBox = document.querySelector("#notes");
-    const resultsBox = document.querySelector("#results");
-    const resultsTitle = document.querySelector("#results-title");
-    const queryInput = document.querySelector("#query");
-    const gate = document.querySelector("#gate");
-    const cabinet = document.querySelector("#cabinet");
-    const who = document.querySelector("#who");
-    const showAll = document.querySelector("#show-all");
-    const quizStatus = document.querySelector("#quiz-status");
-    const quizPlay = document.querySelector("#quiz-play");
-    const quizTopic = document.querySelector("#quiz-topic");
-    const quizActions = document.querySelector("#quiz-actions");
-    const previews = new Map();
-    const opened = new Map();
-    let allNotes = [];
-    let notesExpanded = false;
-    let swipeMoved = false;
-
-    const ICONS = {
-      pi: '<span class="glyph">π</span>',
-      globe: '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="8"/><path d="M4 12h16M12 4c2.5 2.8 2.5 13.2 0 16M12 4c-2.5 2.8-2.5 13.2 0 16"/></svg>',
-      book: '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M5 5.5A2.5 2.5 0 0 1 7.5 3H19v16H7.5A2.5 2.5 0 0 0 5 21.5z"/><path d="M5 5.5A2.5 2.5 0 0 1 7.5 8H19"/></svg>'
-    };
-
-    function escapeHtml(value) {
-      return String(value ?? "").replace(/[&<>]/g, (char) => ({
-        "&": "&amp;",
-        "<": "&lt;",
-        ">": "&gt;"
-      })[char]);
-    }
-
-    function polish(html) {
-      return html
-        .replace(/\*\*([^*\n]+)\*\*/g, "<b>$1</b>")
-        .replace(/`([^`\n]+)`/g, "$1");
-    }
-
-    function highlight(value, query) {
-      let html = escapeHtml(value);
-      const words = String(query || "").trim().split(/\s+/).filter(Boolean);
-      words.forEach((word) => {
-        const pattern = new RegExp(word.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "gi");
-        html = html.replace(pattern, (match) => "<mark>" + match + "</mark>");
-      });
-      return polish(html);
-    }
-
-    function subjectKind(subject) {
-      const text = String(subject || "").toLowerCase();
-      if (/алгебр|матем|геометр|уравнен/.test(text)) return "pi";
-      if (/обществ|истори|географ/.test(text)) return "globe";
-      return "book";
-    }
-
-    function showGate(text) {
-      cabinet.hidden = true;
-      who.hidden = true;
-      gate.hidden = false;
-      gate.textContent = text;
-    }
-
-    function showCabinet() {
-      gate.hidden = true;
-      cabinet.hidden = false;
-    }
-
-    function renderProfile(profile) {
-      const parts = [];
-      const name = String(profile.first_name || "").trim();
-      if (name) parts.push(name);
-      if (profile.grade != null) parts.push(profile.grade + " класс");
-      const style = { short: "короче", detail: "подробнее" }[profile.explain_style];
-      if (style) parts.push(style);
-      who.textContent = parts.join(" · ") + " >";
-      who.hidden = parts.length === 0;
-    }
-
-    function noteCard(note) {
-      const id = String(note.id);
-      previews.set(id, note.preview || "");
-      const open = opened.has(id);
-      const snippet = open ? highlight(opened.get(id) || "", queryInput.value) : "";
-      return `
-        <div class="swipe" data-id="${escapeHtml(note.id)}">
-          <button type="button" class="trash" aria-label="Удалить">
-            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="1.8"><path d="M4 7h16M9 7V5h6v2M8 7l1 13h6l1-13"/></svg>
-          </button>
-          <article class="face card note">
-            <div class="icon">${ICONS[subjectKind(note.subject)]}</div>
-            <div>
-              <h3>${polish(escapeHtml(note.title))}</h3>
-              <div class="meta">${escapeHtml(note.subject || "без предмета")}</div>
-              <div class="snippet"${open ? "" : " hidden"}>${snippet}</div>
-            </div>
-            <span class="chev">›</span>
-          </article>
-        </div>
-      `;
-    }
-
-    function renderNotes(notes) {
-      allNotes = notes;
-      notesExpanded = false;
-      previews.clear();
-      opened.clear();
-      paintNotes();
-    }
-
-    function paintNotes() {
-      if (!allNotes.length) {
-        showAll.hidden = true;
-        notesBox.innerHTML = '<p class="empty">Конспекты появятся, когда в чате нажмёте «В конспект».</p>';
-        return;
-      }
-      const visible = notesExpanded ? allNotes : allNotes.slice(0, 3);
-      showAll.hidden = allNotes.length <= 3 || notesExpanded;
-      notesBox.innerHTML = visible.map(noteCard).join("");
-      bindSwipe();
-    }
-
-    function renderResults(hits, query) {
-      const active = Boolean(query.trim());
-      resultsTitle.hidden = !active;
-      if (!active) {
-        resultsBox.innerHTML = "";
-        return;
-      }
-      if (!hits.length) {
-        resultsBox.innerHTML = '<p class="empty">Ничего не нашлось.</p>';
-        return;
-      }
-      resultsBox.innerHTML = hits.map((hit) => `
-        <article class="card">
-          <div class="icon">${ICONS[subjectKind(hit.subject)]}</div>
-          <div>
-            <h3>${highlight(hit.title, query)}</h3>
-            <div class="meta">${escapeHtml(hit.subject || "без предмета")}</div>
-            <div class="snippet">${highlight(hit.snippet, query)}</div>
-            ${hit.semantic ? '<div class="badge">Совпадение по смыслу</div>' : ""}
-          </div>
-          <span class="chev">›</span>
-        </article>
-      `).join("");
-    }
-
-    async function loadCabinet() {
-      const profileResponse = await fetch("/api/profile");
-      if (profileResponse.status === 401) {
-        showGate(LOCKED);
-        return;
-      }
-      if (!profileResponse.ok) {
-        showGate("Кабинет не смог открыть базу.");
-        return;
-      }
-      renderProfile(await profileResponse.json());
-      const notesResponse = await fetch("/api/notes");
-      if (notesResponse.status === 401) {
-        showGate(LOCKED);
-        return;
-      }
-      if (!notesResponse.ok) {
-        showGate("Кабинет не смог открыть базу.");
-        return;
-      }
-      const notesPayload = await notesResponse.json();
-      renderNotes(notesPayload.notes || []);
-      showCabinet();
-    }
-
-    document.querySelector("#search-form").addEventListener("submit", async (event) => {
-      event.preventDefault();
-      const query = queryInput.value;
-      if (!query.trim()) {
-        renderResults([], query);
-        return;
-      }
-      const response = await fetch("/api/search?q=" + encodeURIComponent(query));
-      if (response.status === 401) {
-        showGate(LOCKED);
-        return;
-      }
-      if (!response.ok) {
-        resultsTitle.hidden = false;
-        resultsBox.innerHTML = '<p class="error">Поиск не ответил.</p>';
-        return;
-      }
-      renderResults(await response.json(), query);
-      renderNotesFromCache();
-    });
-
-    function renderNotesFromCache() {
-      notesBox.querySelectorAll(".swipe").forEach((row) => {
-        const id = row.dataset.id;
-        const snippet = row.querySelector(".snippet");
-        const open = opened.has(id);
-        snippet.hidden = !open;
-        snippet.innerHTML = highlight(open ? opened.get(id) || "" : "", queryInput.value);
-      });
-    }
-
-    async function deleteNote(row) {
-      const id = row.dataset.id;
-      const response = await fetch("/api/notes/" + encodeURIComponent(id), { method: "DELETE" });
-      if (response.status === 401) {
-        showGate(LOCKED);
-        return;
-      }
-      if (!response.ok) return;
-      previews.delete(id);
-      opened.delete(id);
-      allNotes = allNotes.filter((note) => String(note.id) !== id);
-      paintNotes();
-    }
-
-    function bindSwipe() {
-      notesBox.querySelectorAll(".swipe").forEach((row) => {
-        const face = row.querySelector(".face");
-        let startX = 0;
-        let startY = 0;
-        let base = 0;
-        let dragging = false;
-        let axis = "";
-        face.addEventListener("pointerdown", (event) => {
-          if (event.target.closest("button")) return;
-          dragging = true;
-          axis = "";
-          startX = event.clientX;
-          startY = event.clientY;
-          base = row.classList.contains("open-swipe") ? -72 : 0;
-          face.setPointerCapture(event.pointerId);
-        });
-        face.addEventListener("pointermove", (event) => {
-          if (!dragging) return;
-          const mx = event.clientX - startX;
-          const my = event.clientY - startY;
-          if (!axis && Math.hypot(mx, my) > 6) axis = Math.abs(mx) > Math.abs(my) ? "x" : "y";
-          if (axis !== "x") return;
-          const next = Math.min(0, Math.max(-84, base + mx));
-          face.style.transform = "translateX(" + next + "px)";
-        });
-        face.addEventListener("pointerup", (event) => {
-          if (!dragging) return;
-          dragging = false;
-          const mx = event.clientX - startX;
-          face.style.transform = "";
-          if (axis === "x") {
-            swipeMoved = true;
-            row.classList.toggle("open-swipe", base + mx < -40);
-          }
-          axis = "";
-        });
-        face.addEventListener("pointercancel", () => {
-          dragging = false;
-          face.style.transform = "";
-        });
-      });
-    }
-
-    notesBox.addEventListener("click", async (event) => {
-      const row = event.target.closest(".swipe");
-      if (!row) return;
-      if (event.target.closest(".trash")) {
-        await deleteNote(row);
-        return;
-      }
-      if (swipeMoved) {
-        swipeMoved = false;
-        return;
-      }
-      if (row.classList.contains("open-swipe")) {
-        row.classList.remove("open-swipe");
-        return;
-      }
-      const id = row.dataset.id;
-      const snippet = row.querySelector(".snippet");
-      if (opened.has(id)) {
-        opened.delete(id);
-        snippet.hidden = true;
-        snippet.innerHTML = "";
-        return;
-      }
-      const response = await fetch("/api/notes/" + encodeURIComponent(id));
-      if (response.status === 401) {
-        showGate(LOCKED);
-        return;
-      }
-      if (!response.ok) return;
-      const note = await response.json();
-      opened.set(id, note.body || "");
-      snippet.hidden = false;
-      snippet.innerHTML = highlight(note.body || "", queryInput.value);
-    });
-
-    showAll.addEventListener("click", () => {
-      notesExpanded = true;
-      paintNotes();
-    });
-
-    function setQuizBusy(busy) {
-      quizActions.querySelectorAll("button, input").forEach((control) => {
-        control.disabled = busy;
-      });
-    }
-
-    function renderQuiz(data) {
-      const feedback = data.feedback;
-      const question = data.question;
-      if (data.finished || !question) {
-        const note = feedback
-          ? (feedback.correct ? "Верно. " : "Пока неверно. ") + (feedback.explanation || "")
-          : "";
-        quizPlay.hidden = false;
-        quizPlay.innerHTML = `
-          <h3>${escapeHtml(data.title || "Квиз")}</h3>
-          <p class="feedback ${feedback && feedback.correct ? "ok" : "bad"}">${escapeHtml(note)}</p>
-          <p>Квиз пройден. Закрыто ${escapeHtml(data.done)} из ${escapeHtml(data.total)}.</p>
-        `;
-        return;
-      }
-      const note = feedback
-        ? `<p class="feedback ${feedback.correct ? "ok" : "bad"}">${escapeHtml(
-            (feedback.correct ? "Верно. " : "Пока неверно. ") + (feedback.explanation || "")
-          )}</p>`
-        : "";
-      const options = (question.options || []).map((option, index) => `
-        <button type="button" data-option="${index}">${escapeHtml(option)}</button>
-      `).join("");
-      quizPlay.hidden = false;
-      quizPlay.innerHTML = `
-        <h3>${escapeHtml(data.title || "Квиз")}</h3>
-        <p class="meta">Закрыто ${escapeHtml(data.done)} из ${escapeHtml(data.total)}</p>
-        ${note}
-        <p>${escapeHtml(question.prompt || "")}</p>
-        <div class="options" data-question="${escapeHtml(question.id)}">${options}</div>
-      `;
-    }
-
-    async function startQuiz(url, body) {
-      setQuizBusy(true);
-      quizStatus.textContent = "Собираю квиз";
-      quizPlay.hidden = true;
-      try {
-        const response = await fetch(url, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(body || {})
-        });
-        if (response.status === 401) {
-          showGate(LOCKED);
-          return;
-        }
-        const data = await response.json().catch(() => ({}));
-        if (!response.ok) {
-          quizStatus.textContent = typeof data.detail === "string" ? data.detail : "Квиз не собрался.";
-          return;
-        }
-        quizStatus.textContent = "";
-        renderQuiz(data);
-      } finally {
-        setQuizBusy(false);
-      }
-    }
-
-    document.querySelector("#quiz-errors").addEventListener("click", () => {
-      startQuiz("/api/quizzes/errors");
-    });
-
-    document.querySelector("#quiz-by-topic").addEventListener("click", () => {
-      startQuiz("/api/quizzes/topic", { topic: quizTopic.value });
-    });
-
-    quizPlay.addEventListener("click", async (event) => {
-      const button = event.target.closest("button[data-option]");
-      if (!button) return;
-      const questionId = Number(button.parentElement.dataset.question);
-      const option = Number(button.dataset.option);
-      setQuizBusy(true);
-      quizPlay.querySelectorAll("button").forEach((item) => {
-        item.disabled = true;
-      });
-      try {
-        const response = await fetch("/api/quizzes/answer", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ question_id: questionId, option })
-        });
-        if (response.status === 401) {
-          showGate(LOCKED);
-          return;
-        }
-        const data = await response.json().catch(() => ({}));
-        if (!response.ok) {
-          quizStatus.textContent = typeof data.detail === "string" ? data.detail : "Ответ не принят.";
-          quizPlay.querySelectorAll("button").forEach((item) => {
-            item.disabled = false;
-          });
-          return;
-        }
-        quizStatus.textContent = "";
-        renderQuiz(data);
-      } finally {
-        setQuizBusy(false);
-      }
-    });
-
-    async function enter() {
-      const webApp = window.WebApp;
-      const initData = webApp && typeof webApp.initData === "string" ? webApp.initData : "";
-      if (webApp && typeof webApp.ready === "function") webApp.ready();
-      if (initData) {
-        const response = await fetch("/api/session", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ init_data: initData })
-        });
-        if (response.status === 401) {
-          showGate("Не удалось подтвердить вход. Закройте кабинет и откройте его кнопкой в чате.");
-          return;
-        }
-        if (!response.ok) {
-          showGate("Кабинет не смог открыть базу.");
-          return;
-        }
-      }
-      await loadCabinet();
-    }
-
-    enter().catch(() => showGate("Кабинет не смог открыть базу."));
-  </script>
+  <script src="/static/cabinet.js"></script>
 </body>
 </html>

@@ -2,6 +2,7 @@ import logging
 from dataclasses import dataclass
 
 from app.db import Database
+from app.services.skills import normalize_name, record
 from app.services.tutor import CheckResult, Tutor, TutorReply
 from app.textutil import clip, fts_match, markers_to_html, strip_markers
 
@@ -44,24 +45,41 @@ def note_body_from_check(check: dict) -> str:
 
 
 async def save_reply(db: Database, user_id: int, reply: TutorReply, source: str) -> int:
-    return await db.insert_note(
+    note_id = await db.insert_note(
         user_id=user_id,
         title=reply.title,
         subject=reply.subject,
         body=note_body_from_reply(reply),
         source=source,
     )
+    await _link_note(db, user_id, note_id, reply.skill)
+    return note_id
+
+
+async def _link_note(db: Database, user_id: int, note_id: int, raw_skill: str) -> None:
+    key = normalize_name(raw_skill)
+    if not key:
+        return
+    for skill in await db.list_skills(user_id):
+        if normalize_name(skill["name"]) == key:
+            await db.set_note_skill(user_id, note_id, int(skill["id"]))
+            return
 
 
 async def save_check(db: Database, user_id: int, check: dict) -> int:
     title = (check.get("skill") or check.get("problem") or "Разбор решения").strip()
-    return await db.insert_note(
+    note_id = await db.insert_note(
         user_id=user_id,
         title=title[:80],
         subject=check.get("subject") or "Школьный предмет",
         body=note_body_from_check(check),
         source="photo" if check.get("student_solution") else "chat",
     )
+    if check.get("skill_id"):
+        await db.set_note_skill(user_id, note_id, int(check["skill_id"]))
+    else:
+        await _link_note(db, user_id, note_id, check.get("skill") or "")
+    return note_id
 
 
 async def save_manual(db: Database, user_id: int, text: str) -> int:
@@ -76,7 +94,12 @@ async def save_manual(db: Database, user_id: int, text: str) -> int:
     )
 
 
-async def register_check(db: Database, user_id: int, result: CheckResult) -> int | None:
+async def register_check(
+    db: Database,
+    user_id: int,
+    result: CheckResult,
+    tutor: Tutor | None = None,
+) -> int | None:
     if not result.is_schoolwork:
         return None
     check_id = await db.insert_check(
@@ -93,6 +116,18 @@ async def register_check(db: Database, user_id: int, result: CheckResult) -> int
             "praise": result.praise,
         },
     )
+    change = await record(
+        db,
+        user_id,
+        result.subject,
+        result.skill,
+        result.is_correct,
+        "check",
+        tutor,
+    )
+    if change is not None:
+        result.star_line = change.sentence
+        await db.set_check_skill(check_id, change.skill_id)
     if not result.is_correct:
         await db.insert_error(
             user_id=user_id,
@@ -100,6 +135,7 @@ async def register_check(db: Database, user_id: int, result: CheckResult) -> int
             problem=result.problem_text or result.student_solution_text or "Учебное решение",
             mistake=result.skill or result.error_step or "ошибка в решении",
             explanation=result.hint or result.error_step or "Нужно разобрать этот шаг ещё раз.",
+            skill_id=change.skill_id if change else None,
         )
     return check_id
 

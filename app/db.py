@@ -15,7 +15,10 @@ CREATE TABLE IF NOT EXISTS users (
     first_name TEXT NOT NULL DEFAULT '',
     created_at TEXT NOT NULL,
     grade INTEGER,
-    explain_style TEXT
+    explain_style TEXT,
+    chat_id INTEGER,
+    reminders INTEGER NOT NULL DEFAULT 1,
+    last_reminder_on TEXT
 );
 
 CREATE TABLE IF NOT EXISTS sessions (
@@ -42,6 +45,8 @@ CREATE TABLE IF NOT EXISTS notes (
     subject TEXT NOT NULL DEFAULT '',
     body TEXT NOT NULL,
     source TEXT NOT NULL,
+    pinned INTEGER NOT NULL DEFAULT 0,
+    skill_id INTEGER,
     created_at TEXT NOT NULL
 );
 
@@ -52,6 +57,8 @@ CREATE TABLE IF NOT EXISTS errors (
     problem TEXT NOT NULL,
     mistake TEXT NOT NULL,
     explanation TEXT NOT NULL,
+    skill_id INTEGER,
+    resolved_at TEXT,
     created_at TEXT NOT NULL
 );
 
@@ -66,6 +73,7 @@ CREATE TABLE IF NOT EXISTS checks (
     hint TEXT NOT NULL DEFAULT '',
     full_explanation TEXT NOT NULL DEFAULT '',
     skill TEXT NOT NULL DEFAULT '',
+    skill_id INTEGER,
     praise TEXT NOT NULL DEFAULT '',
     created_at TEXT NOT NULL
 );
@@ -87,15 +95,40 @@ CREATE TABLE IF NOT EXISTS quiz_questions (
     options_json TEXT NOT NULL,
     correct_index INTEGER NOT NULL,
     explanation TEXT NOT NULL,
+    skill TEXT NOT NULL DEFAULT '',
+    subject TEXT NOT NULL DEFAULT '',
     status TEXT NOT NULL,
     position INTEGER NOT NULL,
     attempts INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS skills (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    subject TEXT NOT NULL DEFAULT '',
+    name TEXT NOT NULL,
+    strength REAL NOT NULL DEFAULT 0.2,
+    box INTEGER NOT NULL DEFAULT 1,
+    last_seen_at TEXT NOT NULL,
+    due_at TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE(user_id, subject, name)
+);
+
+CREATE TABLE IF NOT EXISTS skill_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    skill_id INTEGER NOT NULL,
+    kind TEXT NOT NULL,
+    correct INTEGER NOT NULL,
+    created_at TEXT NOT NULL
 );
 
 CREATE INDEX IF NOT EXISTS idx_notes_user ON notes(user_id, id);
 CREATE INDEX IF NOT EXISTS idx_messages_user ON messages(user_id, id);
 CREATE INDEX IF NOT EXISTS idx_errors_user ON errors(user_id, id);
 CREATE INDEX IF NOT EXISTS idx_questions_quiz ON quiz_questions(quiz_id, status, position);
+CREATE INDEX IF NOT EXISTS idx_skills_user ON skills(user_id, due_at);
+CREATE INDEX IF NOT EXISTS idx_skill_events_skill ON skill_events(skill_id, id);
 
 CREATE VIRTUAL TABLE IF NOT EXISTS notes_fts USING fts5(
     title,
@@ -150,6 +183,8 @@ class Database:
         await self._conn.execute("PRAGMA foreign_keys = ON")
         await self._conn.executescript(SCHEMA)
         await self._ensure_user_columns()
+        await self._ensure_note_columns()
+        await self._ensure_skill_columns()
         await self._conn.commit()
 
     async def close(self) -> None:
@@ -170,6 +205,46 @@ class Database:
             await self.conn.execute("ALTER TABLE users ADD COLUMN grade INTEGER")
         if "explain_style" not in have:
             await self.conn.execute("ALTER TABLE users ADD COLUMN explain_style TEXT")
+        if "chat_id" not in have:
+            await self.conn.execute("ALTER TABLE users ADD COLUMN chat_id INTEGER")
+        if "reminders" not in have:
+            await self.conn.execute(
+                "ALTER TABLE users ADD COLUMN reminders INTEGER NOT NULL DEFAULT 1"
+            )
+        if "last_reminder_on" not in have:
+            await self.conn.execute("ALTER TABLE users ADD COLUMN last_reminder_on TEXT")
+
+    async def _ensure_note_columns(self) -> None:
+        cursor = await self.conn.execute("PRAGMA table_info(notes)")
+        have = {row["name"] for row in await cursor.fetchall()}
+        if "pinned" not in have:
+            await self.conn.execute(
+                "ALTER TABLE notes ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0"
+            )
+        if "skill_id" not in have:
+            await self.conn.execute("ALTER TABLE notes ADD COLUMN skill_id INTEGER")
+
+    async def _ensure_skill_columns(self) -> None:
+        cursor = await self.conn.execute("PRAGMA table_info(errors)")
+        have = {row["name"] for row in await cursor.fetchall()}
+        if "skill_id" not in have:
+            await self.conn.execute("ALTER TABLE errors ADD COLUMN skill_id INTEGER")
+        if "resolved_at" not in have:
+            await self.conn.execute("ALTER TABLE errors ADD COLUMN resolved_at TEXT")
+        cursor = await self.conn.execute("PRAGMA table_info(checks)")
+        have = {row["name"] for row in await cursor.fetchall()}
+        if "skill_id" not in have:
+            await self.conn.execute("ALTER TABLE checks ADD COLUMN skill_id INTEGER")
+        cursor = await self.conn.execute("PRAGMA table_info(quiz_questions)")
+        have = {row["name"] for row in await cursor.fetchall()}
+        if "skill" not in have:
+            await self.conn.execute(
+                "ALTER TABLE quiz_questions ADD COLUMN skill TEXT NOT NULL DEFAULT ''"
+            )
+        if "subject" not in have:
+            await self.conn.execute(
+                "ALTER TABLE quiz_questions ADD COLUMN subject TEXT NOT NULL DEFAULT ''"
+            )
 
     async def upsert_user(self, user_id: int, first_name: str) -> None:
         now = utcnow()
@@ -179,7 +254,7 @@ class Database:
             VALUES (?, ?, ?)
             ON CONFLICT(user_id) DO UPDATE SET
                 first_name = CASE
-                    WHEN excluded.first_name != '' THEN excluded.first_name
+                    WHEN users.first_name = '' THEN excluded.first_name
                     ELSE users.first_name
                 END
             """,
@@ -197,14 +272,14 @@ class Database:
 
     async def get_user(self, user_id: int) -> dict:
         cursor = await self.conn.execute(
-            "SELECT user_id, first_name, grade, explain_style FROM users WHERE user_id = ?",
+            "SELECT user_id, first_name, grade, explain_style, chat_id, reminders, last_reminder_on FROM users WHERE user_id = ?",
             (user_id,),
         )
         row = await cursor.fetchone()
         if row is None:
             await self.upsert_user(user_id, "")
             cursor = await self.conn.execute(
-                "SELECT user_id, first_name, grade, explain_style FROM users WHERE user_id = ?",
+                "SELECT user_id, first_name, grade, explain_style, chat_id, reminders, last_reminder_on FROM users WHERE user_id = ?",
                 (user_id,),
             )
             row = await cursor.fetchone()
@@ -217,6 +292,13 @@ class Database:
         )
         await self.conn.commit()
 
+    async def set_profile(self, user_id: int, first_name: str, grade: int) -> None:
+        await self.conn.execute(
+            "UPDATE users SET first_name = ?, grade = ? WHERE user_id = ?",
+            (first_name, grade, user_id),
+        )
+        await self.conn.commit()
+
     async def set_explain_style(self, user_id: int, style: str) -> None:
         await self.conn.execute(
             "UPDATE users SET explain_style = ? WHERE user_id = ?",
@@ -226,7 +308,7 @@ class Database:
 
     async def find_user(self, user_id: int) -> dict | None:
         cursor = await self.conn.execute(
-            "SELECT user_id, first_name, grade, explain_style FROM users WHERE user_id = ?",
+            "SELECT user_id, first_name, grade, explain_style, chat_id, reminders, last_reminder_on FROM users WHERE user_id = ?",
             (user_id,),
         )
         row = await cursor.fetchone()
@@ -249,7 +331,8 @@ class Database:
             return None
         cursor = await self.conn.execute(
             """
-            SELECT users.user_id, users.first_name, users.grade, users.explain_style
+            SELECT users.user_id, users.first_name, users.grade, users.explain_style,
+                   users.chat_id, users.reminders, users.last_reminder_on
             FROM cabinet_sessions
             JOIN users ON users.user_id = cabinet_sessions.user_id
             WHERE cabinet_sessions.token = ? AND cabinet_sessions.expires_at > ?
@@ -382,10 +465,10 @@ class Database:
     async def list_notes(self, user_id: int, offset: int, limit: int) -> list[dict]:
         cursor = await self.conn.execute(
             """
-            SELECT id, title, subject, body, source, created_at
+            SELECT id, title, subject, body, source, pinned, created_at
             FROM notes
             WHERE user_id = ?
-            ORDER BY id DESC
+            ORDER BY pinned DESC, id DESC
             LIMIT ? OFFSET ?
             """,
             (user_id, limit, offset),
@@ -412,13 +495,46 @@ class Database:
         await self.conn.commit()
         return cursor.rowcount > 0
 
+    async def set_note_pinned(self, user_id: int, note_id: int, pinned: bool) -> bool:
+        cursor = await self.conn.execute(
+            "UPDATE notes SET pinned = ? WHERE id = ? AND user_id = ?",
+            (1 if pinned else 0, note_id, user_id),
+        )
+        await self.conn.commit()
+        return cursor.rowcount > 0
+
+    async def update_note(
+        self,
+        user_id: int,
+        note_id: int,
+        title: str,
+        subject: str,
+        body: str,
+    ) -> bool:
+        cursor = await self.conn.execute(
+            """
+            UPDATE notes
+            SET title = ?, subject = ?, body = ?
+            WHERE id = ? AND user_id = ?
+            """,
+            (
+                title.strip()[:120] or "Конспект",
+                (subject or "").strip()[:80],
+                body.strip(),
+                note_id,
+                user_id,
+            ),
+        )
+        await self.conn.commit()
+        return cursor.rowcount > 0
+
     async def note_cards(self, user_id: int, limit: int = 30) -> list[dict]:
         cursor = await self.conn.execute(
             """
             SELECT id, title, subject, substr(body, 1, 180) AS preview
             FROM notes
             WHERE user_id = ?
-            ORDER BY id DESC
+            ORDER BY pinned DESC, id DESC
             LIMIT ?
             """,
             (user_id, limit),
@@ -464,11 +580,12 @@ class Database:
         problem: str,
         mistake: str,
         explanation: str,
+        skill_id: int | None = None,
     ) -> int:
         cursor = await self.conn.execute(
             """
-            INSERT INTO errors (user_id, subject, problem, mistake, explanation, created_at)
-            VALUES (?, ?, ?, ?, ?, ?)
+            INSERT INTO errors (user_id, subject, problem, mistake, explanation, skill_id, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 user_id,
@@ -476,6 +593,7 @@ class Database:
                 problem.strip()[:2000],
                 mistake.strip()[:300] or "ошибка в решении",
                 explanation.strip()[:2000],
+                skill_id,
                 utcnow(),
             ),
         )
@@ -485,9 +603,9 @@ class Database:
     async def list_errors(self, user_id: int, limit: int = 8) -> list[dict]:
         cursor = await self.conn.execute(
             """
-            SELECT id, subject, problem, mistake, explanation, created_at
+            SELECT id, subject, problem, mistake, explanation, skill_id, created_at
             FROM errors
-            WHERE user_id = ?
+            WHERE user_id = ? AND resolved_at IS NULL
             ORDER BY id DESC
             LIMIT ?
             """,
@@ -497,7 +615,7 @@ class Database:
 
     async def count_errors(self, user_id: int) -> int:
         cursor = await self.conn.execute(
-            "SELECT COUNT(*) AS total FROM errors WHERE user_id = ?",
+            "SELECT COUNT(*) AS total FROM errors WHERE user_id = ? AND resolved_at IS NULL",
             (user_id,),
         )
         row = await cursor.fetchone()
@@ -566,9 +684,9 @@ class Database:
                 """
                 INSERT INTO quiz_questions (
                     quiz_id, prompt, options_json, correct_index,
-                    explanation, status, position, attempts
+                    explanation, skill, subject, status, position, attempts
                 )
-                VALUES (?, ?, ?, ?, ?, 'pending', ?, 0)
+                VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, 0)
                 """,
                 (
                     quiz_id,
@@ -576,6 +694,8 @@ class Database:
                     json.dumps(question["options"], ensure_ascii=False),
                     int(question["correct_index"]),
                     question["explanation"],
+                    (question.get("skill") or "")[:80],
+                    (question.get("subject") or "")[:80],
                     position,
                 ),
             )
@@ -680,6 +800,194 @@ class Database:
             WHERE user_id = ? AND active_quiz_id = ?
             """,
             (now, user_id, quiz_id),
+        )
+        await self.conn.commit()
+
+    async def quiz_questions(self, quiz_id: int) -> list[dict]:
+        cursor = await self.conn.execute(
+            """
+            SELECT id, prompt, explanation, skill, subject, attempts, status
+            FROM quiz_questions
+            WHERE quiz_id = ?
+            ORDER BY id
+            """,
+            (quiz_id,),
+        )
+        return [dict(row) for row in await cursor.fetchall()]
+
+    async def set_chat(self, user_id: int, chat_id: int | None) -> None:
+        if chat_id is None:
+            return
+        await self.conn.execute(
+            "UPDATE users SET chat_id = ? WHERE user_id = ?",
+            (chat_id, user_id),
+        )
+        await self.conn.commit()
+
+    async def set_reminders(self, user_id: int, enabled: bool) -> None:
+        await self.conn.execute(
+            "UPDATE users SET reminders = ? WHERE user_id = ?",
+            (1 if enabled else 0, user_id),
+        )
+        await self.conn.commit()
+
+    async def list_skills(self, user_id: int) -> list[dict]:
+        cursor = await self.conn.execute(
+            """
+            SELECT id, user_id, subject, name, strength, box, last_seen_at, due_at, created_at
+            FROM skills
+            WHERE user_id = ?
+            ORDER BY subject, id
+            """,
+            (user_id,),
+        )
+        return [dict(row) for row in await cursor.fetchall()]
+
+    async def get_skill(self, user_id: int, skill_id: int) -> dict | None:
+        cursor = await self.conn.execute(
+            """
+            SELECT id, user_id, subject, name, strength, box, last_seen_at, due_at, created_at
+            FROM skills
+            WHERE id = ? AND user_id = ?
+            """,
+            (skill_id, user_id),
+        )
+        row = await cursor.fetchone()
+        return dict(row) if row else None
+
+    async def insert_skill(
+        self,
+        user_id: int,
+        subject: str,
+        name: str,
+        strength: float,
+        box: int,
+        last_seen_at: str,
+        due_at: str,
+    ) -> int:
+        cursor = await self.conn.execute(
+            """
+            INSERT INTO skills (
+                user_id, subject, name, strength, box, last_seen_at, due_at, created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (user_id, subject[:80], name[:80], strength, box, last_seen_at, due_at, utcnow()),
+        )
+        await self.conn.commit()
+        return int(cursor.lastrowid)
+
+    async def update_skill(
+        self,
+        skill_id: int,
+        strength: float,
+        box: int,
+        last_seen_at: str,
+        due_at: str,
+    ) -> None:
+        await self.conn.execute(
+            """
+            UPDATE skills
+            SET strength = ?, box = ?, last_seen_at = ?, due_at = ?
+            WHERE id = ?
+            """,
+            (strength, box, last_seen_at, due_at, skill_id),
+        )
+        await self.conn.commit()
+
+    async def insert_skill_event(self, skill_id: int, kind: str, correct: bool) -> None:
+        await self.conn.execute(
+            """
+            INSERT INTO skill_events (skill_id, kind, correct, created_at)
+            VALUES (?, ?, ?, ?)
+            """,
+            (skill_id, kind, 1 if correct else 0, utcnow()),
+        )
+        await self.conn.commit()
+
+    async def list_skill_events(self, skill_id: int, limit: int = 12) -> list[dict]:
+        cursor = await self.conn.execute(
+            """
+            SELECT kind, correct, created_at
+            FROM skill_events
+            WHERE skill_id = ?
+            ORDER BY id DESC
+            LIMIT ?
+            """,
+            (skill_id, limit),
+        )
+        rows = [dict(row) for row in await cursor.fetchall()]
+        rows.reverse()
+        return rows
+
+    async def resolve_errors(self, user_id: int, skill_id: int) -> None:
+        await self.conn.execute(
+            """
+            UPDATE errors
+            SET resolved_at = ?
+            WHERE user_id = ? AND skill_id = ? AND resolved_at IS NULL
+            """,
+            (utcnow(), user_id, skill_id),
+        )
+        await self.conn.commit()
+
+    async def set_note_skill(self, user_id: int, note_id: int, skill_id: int) -> None:
+        await self.conn.execute(
+            "UPDATE notes SET skill_id = ? WHERE id = ? AND user_id = ?",
+            (skill_id, note_id, user_id),
+        )
+        await self.conn.commit()
+
+    async def set_check_skill(self, check_id: int, skill_id: int) -> None:
+        await self.conn.execute(
+            "UPDATE checks SET skill_id = ? WHERE id = ?",
+            (skill_id, check_id),
+        )
+        await self.conn.commit()
+
+    async def notes_for_skill(self, user_id: int, skill_id: int) -> list[dict]:
+        cursor = await self.conn.execute(
+            """
+            SELECT id, title, subject
+            FROM notes
+            WHERE user_id = ? AND skill_id = ?
+            ORDER BY id DESC
+            LIMIT 5
+            """,
+            (user_id, skill_id),
+        )
+        return [dict(row) for row in await cursor.fetchall()]
+
+    async def errors_for_skill(self, user_id: int, skill_id: int) -> list[dict]:
+        cursor = await self.conn.execute(
+            """
+            SELECT id, subject, problem, mistake, resolved_at
+            FROM errors
+            WHERE user_id = ? AND skill_id = ?
+            ORDER BY id DESC
+            LIMIT 5
+            """,
+            (user_id, skill_id),
+        )
+        return [dict(row) for row in await cursor.fetchall()]
+
+    async def users_to_remind(self, today: str) -> list[dict]:
+        cursor = await self.conn.execute(
+            """
+            SELECT user_id, first_name, chat_id
+            FROM users
+            WHERE reminders = 1
+              AND chat_id IS NOT NULL
+              AND (last_reminder_on IS NULL OR last_reminder_on < ?)
+            """,
+            (today,),
+        )
+        return [dict(row) for row in await cursor.fetchall()]
+
+    async def mark_reminded(self, user_id: int, today: str) -> None:
+        await self.conn.execute(
+            "UPDATE users SET last_reminder_on = ? WHERE user_id = ?",
+            (today, user_id),
         )
         await self.conn.commit()
 

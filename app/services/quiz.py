@@ -2,6 +2,7 @@ import json
 from dataclasses import dataclass
 
 from app.db import Database
+from app.services.skills import dim_skills, record
 from app.services.tutor import Tutor, TutorError
 from app.textutil import format_elapsed
 
@@ -19,6 +20,8 @@ class AnswerView:
     elapsed: str
     quiz_title: str
     next_question: dict | None
+    star: str = ""
+    skill_id: int | None = None
 
 
 def question_options(question: dict) -> list[str]:
@@ -27,11 +30,55 @@ def question_options(question: dict) -> list[str]:
 
 
 async def start_topic_quiz(db: Database, tutor: Tutor, user_id: int, topic: str) -> int:
-    title, drafts = await tutor.make_quiz(topic=topic, errors=None)
+    title, drafts = await tutor.make_quiz(topic=topic, errors=None, fallback=topic)
+    return await _save_quiz(db, user_id, title, "topic", drafts)
+
+
+async def start_note_quiz(db: Database, tutor: Tutor, user_id: int, note: dict) -> int:
+    body = (note.get("body") or "")[:4000]
+    title = (note.get("title") or "Конспект")[:80]
+    prompt = f"{title}\nКонспект:\n{body}" if body else title
+    quiz_title, drafts = await tutor.make_quiz(topic=prompt, errors=None, fallback=title)
+    return await _save_quiz(db, user_id, quiz_title, "note", drafts)
+
+
+async def start_review_quiz(
+    db: Database,
+    tutor: Tutor,
+    user_id: int,
+    skill_id: int | None = None,
+) -> tuple[int, list[int]] | None:
+    skills = await db.list_skills(user_id)
+    if skill_id is not None:
+        chosen = [skill for skill in skills if int(skill["id"]) == skill_id]
+    else:
+        chosen = dim_skills(skills, limit=3)
+    if not chosen:
+        return None
+    payload = [
+        {
+            "subject": skill["subject"],
+            "problem": skill["name"],
+            "mistake": skill["name"],
+            "explanation": "Повтори этот приём на новой задаче.",
+        }
+        for skill in chosen
+    ]
+    title, drafts = await tutor.make_quiz(
+        topic=None,
+        errors=payload,
+        fallback="Повторение",
+        wanted=4,
+    )
+    quiz_id = await _save_quiz(db, user_id, title or "Повторение", "review", drafts)
+    return quiz_id, [int(skill["id"]) for skill in chosen]
+
+
+async def _save_quiz(db: Database, user_id: int, title: str, source: str, drafts) -> int:
     return await db.create_quiz(
         user_id,
         title,
-        "topic",
+        source,
         [draft.__dict__ for draft in drafts],
     )
 
@@ -63,6 +110,7 @@ async def answer_question(
     user_id: int,
     question_id: int,
     option_index: int,
+    tutor: Tutor | None = None,
 ) -> AnswerView:
     question = await db.get_question(question_id)
     if question is None:
@@ -90,6 +138,16 @@ async def answer_question(
         await db.mark_question_done(question_id)
     else:
         await db.requeue_question(question_id)
+    kind = "review" if quiz.get("source") == "review" else "quiz"
+    change = await record(
+        db,
+        user_id,
+        question.get("subject") or "",
+        question.get("skill") or "",
+        correct,
+        kind,
+        tutor,
+    )
     done, total = await db.quiz_counts(quiz["id"])
     nxt = await db.next_pending(quiz["id"])
     finished = nxt is None
@@ -107,6 +165,8 @@ async def answer_question(
         elapsed=elapsed,
         quiz_title=quiz["title"],
         next_question=nxt,
+        star=change.sentence if change else "",
+        skill_id=change.skill_id if change else None,
     )
 
 

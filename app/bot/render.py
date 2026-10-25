@@ -71,6 +71,8 @@ def render_check(result: CheckResult) -> str:
         lines.append("Полный разбор откроется кнопкой «Показать решение».")
     if result.skill:
         lines.append("<b>Приём:</b> " + model_html(result.skill))
+    if result.star_line:
+        lines.append(esc(result.star_line))
     return "\n\n".join(lines)
 
 
@@ -132,6 +134,8 @@ def render_feedback(view: AnswerView) -> str:
         text = "<b>Пока неверно.</b> Задача вернётся в конец очереди."
     if view.explanation:
         text += " " + model_html(view.explanation)
+    if view.star:
+        text += "\n" + esc(view.star)
     return text
 
 

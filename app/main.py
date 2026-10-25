@@ -7,6 +7,8 @@ from maxapi.enums.parse_mode import ParseMode
 
 from app.bot.commands import bot_commands
 from app.bot.handlers import BotApp
+from app.bot.keyboards import cabinet_keyboard
+from app.services.reminders import due_reminder, in_quiet_hours, moscow_now
 from app.config import get_settings
 from app.db import Database
 from app.services.tutor import Tutor
@@ -46,7 +48,35 @@ async def run_bot(
             exc_info=True,
         )
     log.info("Бот слушает MAX через long polling")
-    await dispatcher.start_polling(bot)
+    reminders = asyncio.create_task(_remind_loop(bot, db, cabinet_url, web_app))
+    try:
+        await dispatcher.start_polling(bot)
+    finally:
+        reminders.cancel()
+
+
+async def _remind_loop(bot, db, cabinet_url: str, web_app: str) -> None:
+    await asyncio.sleep(45)
+    while True:
+        try:
+            if not in_quiet_hours():
+                today = moscow_now().date().isoformat()
+                markup = cabinet_keyboard(web_app) if cabinet_url.strip() else None
+                for user in await db.users_to_remind(today):
+                    text = await due_reminder(db, int(user["user_id"]))
+                    if not text:
+                        continue
+                    await bot.send_message(
+                        chat_id=user["chat_id"],
+                        user_id=int(user["user_id"]),
+                        text=text,
+                        attachments=[markup] if markup is not None else None,
+                        parse_mode=ParseMode.HTML,
+                    )
+                    await db.mark_reminded(int(user["user_id"]), today)
+        except Exception:
+            log.exception("Напоминание о звёздах не отправилось")
+        await asyncio.sleep(1800)
 
 
 async def amain() -> None:

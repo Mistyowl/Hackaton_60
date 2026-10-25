@@ -109,20 +109,23 @@ def tutor_keyboard(has_solution: bool):
     )
 
 
-def check_keyboard(check_id: int, is_correct: bool):
+def check_keyboard(check_id: int, is_correct: bool, web_app: str = ""):
     actions = []
     if not is_correct:
         actions.append(
             CallbackButton(text="Показать решение", payload=f"check:reveal:{check_id}")
         )
     actions.append(CallbackButton(text="В конспект", payload=f"check:save:{check_id}"))
-    return _markup(
+    rows = [
         actions,
         [
             CallbackButton(text="Похожая задача", payload=f"check:similar:{check_id}"),
             CallbackButton(text="🏠 Меню", payload="menu:home"),
         ],
-    )
+    ]
+    if web_app.strip():
+        rows.append([_app_button("Небо", web_app)])
+    return _markup(*rows)
 
 
 def quiz_keyboard(question_id: int, option_count: int):

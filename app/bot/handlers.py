@@ -40,6 +40,7 @@ from app.bot.render import (
     render_search,
 )
 from app.config import ACCESS_CLOSED, user_allowed
+from app.services.limits import allow
 from app.db import Database
 from app.services.notes import (
     PAGE_SIZE,
@@ -96,6 +97,7 @@ class BotApp:
             await self.send(event.chat_id, user.user_id, ACCESS_CLOSED, None)
             return
         await self.db.upsert_user(user.user_id, user.first_name or "")
+        await self.db.set_chat(user.user_id, event.chat_id)
         step = await self._onboard_step(user.user_id)
         if step:
             await self._send_onboarding(event.chat_id, user.user_id, step, image=LUMI_IMAGE)
@@ -152,6 +154,7 @@ class BotApp:
             await self.send(chat_id, user_id, ACCESS_CLOSED, None)
             return
         await self.db.upsert_user(user_id, first_name)
+        await self.db.set_chat(user_id, chat_id)
         body = event.message.body
         text = (body.text or "").strip() if body else ""
         image_url = self._image_url(event)
@@ -209,6 +212,7 @@ class BotApp:
         if event.callback.user is not None:
             name = event.callback.user.first_name or ""
         await self.db.upsert_user(user_id, name)
+        await self.db.set_chat(user_id, chat_id)
         payload = event.callback.payload or ""
         step = await self._onboard_step(user_id)
         if payload.startswith("grade:") and step == "grade":
@@ -400,7 +404,20 @@ class BotApp:
             return
         await self.send(chat_id, user_id, "Такой команды нет. Выберите действие в меню.", self._menu())
 
+    async def _guard(self, chat_id, user_id: int) -> bool:
+        if allow(user_id):
+            return True
+        await self.send(
+            chat_id,
+            user_id,
+            "Слишком много запросов. Попробуйте через час.",
+            self._menu(),
+        )
+        return False
+
     async def _handle_tutor(self, chat_id, user_id: int, text: str) -> None:
+        if not await self._guard(chat_id, user_id):
+            return
         await self.send(chat_id, user_id, "Думаю...", None)
         history = await self.db.recent_messages(user_id)
         dossier = await student_dossier(self.db, user_id)
@@ -413,6 +430,8 @@ class BotApp:
         await self.send(chat_id, user_id, model_html(reply.reply), tutor_keyboard(bool(reply.full_solution)))
 
     async def _handle_check_text(self, chat_id, user_id: int, text: str) -> None:
+        if not await self._guard(chat_id, user_id):
+            return
         await self.send(chat_id, user_id, "Проверяю решение.", None)
         try:
             result = await self.tutor.check_text(text)
@@ -422,6 +441,8 @@ class BotApp:
         await self._present_check(chat_id, user_id, result)
 
     async def _handle_photo(self, chat_id, user_id: int, url: str, caption: str) -> None:
+        if not await self._guard(chat_id, user_id):
+            return
         await self.send(chat_id, user_id, "Смотрю решение.", None)
         try:
             data = await self.bot.download_bytes(url)
@@ -451,7 +472,7 @@ class BotApp:
         await self._present_check(chat_id, user_id, result)
 
     async def _present_check(self, chat_id, user_id: int, result) -> None:
-        check_id = await register_check(self.db, user_id, result)
+        check_id = await register_check(self.db, user_id, result, self.tutor)
         text = render_check(result)
         if check_id is None:
             await self.send(chat_id, user_id, text, self._menu())
@@ -459,7 +480,7 @@ class BotApp:
         summary = result.hint or result.praise or result.problem_text or "Проверка решения"
         await self.db.add_message(user_id, "user", "Проверка решения")
         await self.db.add_message(user_id, "assistant", summary)
-        await self.send(chat_id, user_id, text, check_keyboard(check_id, result.is_correct))
+        await self.send(chat_id, user_id, text, check_keyboard(check_id, result.is_correct, self.web_app))
 
     async def _handle_search(self, chat_id, user_id: int, query: str) -> None:
         try:
@@ -481,6 +502,8 @@ class BotApp:
         except TutorError as error:
             await self.db.set_mode(user_id, "quiz_topic")
             await self.send(chat_id, user_id, esc(error.user_message), back_keyboard())
+            return
+        if not await self._guard(chat_id, user_id):
             return
         await self.send(chat_id, user_id, "Собираю квиз по теме.", None)
         try:
@@ -558,6 +581,8 @@ class BotApp:
         if last is None:
             await self._notify(event, "Сначала попросите разбор")
             return
+        if not await self._guard(chat_id, user_id):
+            return
         await self._notify(event, "Упрощаю объяснение")
         dossier = await student_dossier(self.db, user_id, records=False)
         try:
@@ -572,6 +597,8 @@ class BotApp:
         last = await self.db.get_last_tutor(user_id)
         if last is None:
             await self._notify(event, "Сначала попросите разбор")
+            return
+        if not await self._guard(chat_id, user_id):
             return
         await self._notify(event, "Подбираю похожую задачу")
         context = (last.get("reply") or "") + "\n" + (last.get("full_solution") or "")
@@ -623,6 +650,8 @@ class BotApp:
         if check is None:
             await self._notify(event, "Эта проверка уже недоступна")
             return
+        if not await self._guard(chat_id, user_id):
+            return
         await self._notify(event, "Подбираю похожую задачу")
         context = check["problem"] or check["hint"] or check["skill"]
         dossier = await student_dossier(self.db, user_id)
@@ -645,6 +674,8 @@ class BotApp:
         if await self.db.count_errors(user_id) == 0:
             await self.send(chat_id, user_id, EMPTY_ERRORS, self._menu())
             return
+        if not await self._guard(chat_id, user_id):
+            return
         await self.send(chat_id, user_id, "Собираю квиз по ошибкам. Это займёт несколько секунд.", None)
         try:
             quiz_id = await start_error_quiz(self.db, self.tutor, user_id)
@@ -664,7 +695,7 @@ class BotApp:
         await self.send(chat_id, user_id, text, quiz_keyboard(question["id"], option_count(question)))
 
     async def _answer_quiz(self, event: MessageCallback, user_id: int, question_id: int, option: int) -> None:
-        view = await answer_question(self.db, user_id, question_id, option)
+        view = await answer_question(self.db, user_id, question_id, option, self.tutor)
         if view.missing:
             await self._notify(event, "Эта кнопка уже не работает")
             return
