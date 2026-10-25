@@ -1,4 +1,6 @@
+import hashlib
 import logging
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -24,10 +26,69 @@ from app.services.tutor import Tutor, TutorError
 from app.webapp import validate_init_data
 
 log = logging.getLogger(__name__)
-PAGE = (Path(__file__).resolve().parent / "cabinet.html").read_text(encoding="utf-8")
-STATIC = Path(__file__).resolve().parent / "static"
-LUMI_MARK = Path(__file__).resolve().parent / "assets" / "lumi-mark.png"
+ROOT = Path(__file__).resolve().parent
+PAGE_PATH = ROOT / "cabinet.html"
+STATIC = ROOT / "static"
+LUMI_MARK = ROOT / "assets" / "lumi-mark.png"
 COOKIE = "cabinet"
+NO_STORE = {
+    "Cache-Control": "no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0",
+    "Pragma": "no-cache",
+    "Expires": "0",
+}
+STATIC_FILES = {
+    "cabinet.css": "text/css",
+    "cabinet.js": "text/javascript",
+    "lumi-happy.svg": "image/svg+xml",
+    "lumi-think.svg": "image/svg+xml",
+    "lumi-support.svg": "image/svg+xml",
+}
+_HASHED_ASSET = re.compile(r"^cabinet\.([0-9a-f]{10})\.(css|js)$")
+
+
+def asset_hash(filename: str) -> str:
+    return hashlib.sha256((STATIC / filename).read_bytes()).hexdigest()[:10]
+
+
+def hashed_asset(filename: str) -> str:
+    stem, ext = filename.split(".", 1)
+    return f"{stem}.{asset_hash(filename)}.{ext}"
+
+
+def build_version() -> str:
+    parts = [
+        asset_hash("cabinet.css"),
+        asset_hash("cabinet.js"),
+        hashlib.sha256(PAGE_PATH.read_bytes()).hexdigest()[:10],
+    ]
+    return hashlib.sha256("".join(parts).encode()).hexdigest()[:12]
+
+
+def cabinet_html() -> str:
+    page = PAGE_PATH.read_text(encoding="utf-8")
+    page = page.replace(
+        "<head>",
+        f'<head>\n  <meta name="lumi-build" content="{build_version()}">',
+        1,
+    )
+    return page.replace(
+        'href="/static/cabinet.css"',
+        f'href="/static/{hashed_asset("cabinet.css")}"',
+    ).replace(
+        'src="/static/cabinet.js"',
+        f'src="/static/{hashed_asset("cabinet.js")}"',
+    )
+
+
+def resolve_static(name: str) -> tuple[Path, str] | None:
+    media = STATIC_FILES.get(name)
+    if media is not None:
+        return STATIC / name, media
+    match = _HASHED_ASSET.fullmatch(name)
+    if match is None:
+        return None
+    filename = f"cabinet.{match.group(2)}"
+    return STATIC / filename, STATIC_FILES[filename]
 
 
 def create_app(
@@ -53,26 +114,25 @@ def create_app(
         return {"status": "ok"}
 
     @app.get("/", response_class=HTMLResponse)
-    async def index() -> str:
-        return PAGE
+    @app.get("/index.html", response_class=HTMLResponse)
+    async def index() -> HTMLResponse:
+        return HTMLResponse(cabinet_html(), headers=NO_STORE)
+
+    @app.get("/api/version")
+    async def version() -> JSONResponse:
+        return JSONResponse({"version": build_version()}, headers=NO_STORE)
 
     @app.get("/assets/lumi-mark.png")
     async def lumi_mark() -> FileResponse:
-        return FileResponse(LUMI_MARK, media_type="image/png")
+        return FileResponse(LUMI_MARK, media_type="image/png", headers=NO_STORE)
 
     @app.get("/static/{name}")
     async def static_file(name: str) -> FileResponse:
-        allowed_files = {
-            "cabinet.css": "text/css",
-            "cabinet.js": "text/javascript",
-            "lumi-happy.svg": "image/svg+xml",
-            "lumi-think.svg": "image/svg+xml",
-            "lumi-support.svg": "image/svg+xml",
-        }
-        media = allowed_files.get(name)
-        if media is None:
+        resolved = resolve_static(name)
+        if resolved is None:
             raise HTTPException(status_code=404, detail="Файл не найден")
-        return FileResponse(STATIC / name, media_type=media)
+        path, media = resolved
+        return FileResponse(path, media_type=media, headers=NO_STORE)
 
     @app.post("/api/session")
     async def open_session(request: Request) -> JSONResponse:

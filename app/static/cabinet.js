@@ -1184,7 +1184,36 @@ document.querySelector("#profile-form").addEventListener("submit", async (event)
 const app = bridge();
 if (app && app.BackButton && app.BackButton.onClick) app.BackButton.onClick(goBack);
 
+async function ensureFreshBuild() {
+  const meta = document.querySelector('meta[name="lumi-build"]');
+  const embedded = meta ? meta.content : "";
+  let remote = "";
+  try {
+    const response = await fetch("/api/version", { cache: "no-store" });
+    if (response.ok) {
+      const data = await response.json();
+      remote = String(data.version || "");
+    }
+  } catch (error) {
+    return false;
+  }
+  if (!remote || !embedded || remote === embedded) return false;
+  if (sessionStorage.getItem("lumi-bust") === remote) return false;
+  sessionStorage.setItem("lumi-bust", remote);
+  if ("caches" in window) {
+    try {
+      const names = await caches.keys();
+      await Promise.all(names.map((name) => caches.delete(name)));
+    } catch (error) { /* WebView может запретить Cache Storage */ }
+  }
+  const url = new URL(window.location.href);
+  url.searchParams.set("v", remote);
+  window.location.replace(url.toString());
+  return true;
+}
+
 async function enter() {
+  if (await ensureFreshBuild()) return;
   const webApp = bridge();
   const initData = webApp && typeof webApp.initData === "string" ? webApp.initData : "";
   if (webApp && typeof webApp.ready === "function") webApp.ready();
