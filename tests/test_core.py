@@ -164,6 +164,17 @@ class FakeTutor:
         self.calls += 1
         return [note_id for note_id in self.ids if any(card["id"] == note_id for card in cards)]
 
+    async def make_quiz(self, topic: str | None, errors: list[dict] | None):
+        title = topic or "По моим ошибкам"
+        return title, [
+            QuestionDraft(
+                prompt="Сколько будет 2+2?",
+                options=["3", "4"],
+                correct_index=1,
+                explanation="Четыре.",
+            )
+        ]
+
 
 class DatabaseTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
@@ -319,6 +330,36 @@ class DatabaseTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(again.already_closed)
         stranger = await answer_question(self.db, 2, returned["id"], 1)
         self.assertTrue(stranger.missing)
+
+    async def test_cabinet_quiz_hides_the_answer(self) -> None:
+        app = create_app(self.db, FakeTutor(), BOT_TOKEN)
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="https://cabinet") as client:
+            topic = await client.post("/api/quizzes/topic", json={"topic": "дроби"})
+            mistakes = await client.post("/api/quizzes/errors")
+            self.assertEqual(topic.status_code, 401)
+            self.assertEqual(mistakes.status_code, 401)
+            opened = await client.post("/api/session", json={"init_data": _init_data(1, "Аня")})
+            self.assertEqual(opened.status_code, 200)
+            empty = await client.post("/api/quizzes/errors")
+            self.assertEqual(empty.status_code, 409)
+            started = await client.post("/api/quizzes/topic", json={"topic": "дроби"})
+            self.assertEqual(started.status_code, 200)
+            body = started.json()
+            self.assertNotIn("correct_index", started.text)
+            self.assertEqual(body["question"]["prompt"], "Сколько будет 2+2?")
+            self.assertEqual(body["question"]["options"], ["3", "4"])
+            self.assertFalse(body["finished"])
+            answered = await client.post(
+                "/api/quizzes/answer",
+                json={"question_id": body["question"]["id"], "option": 1},
+            )
+            self.assertEqual(answered.status_code, 200)
+            done = answered.json()
+            self.assertTrue(done["feedback"]["correct"])
+            self.assertTrue(done["finished"])
+            self.assertIsNone(done["question"])
+            self.assertNotIn("correct_index", answered.text)
 
     async def test_cabinet_opens_for_the_signed_student(self) -> None:
         await self.db.set_grade(1, 7)
@@ -546,7 +587,7 @@ class DatabaseTests(unittest.IsolatedAsyncioTestCase):
             for row in style_keyboard().payload.buttons
             for button in row
         ]
-        self.assertEqual(grade_payloads, [f"grade:{number}" for number in range(1, 12)])
+        self.assertEqual(grade_payloads, [f"grade:{number}" for number in range(5, 12)])
         self.assertEqual(style_payloads, ["style:short", "style:detail"])
         self.assertNotIn("menu:home", grade_payloads + style_payloads)
         menu_payloads = [
@@ -556,6 +597,8 @@ class DatabaseTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("menu:search", menu_payloads)
         self.assertIn("menu:notes", menu_payloads)
         self.assertNotIn("menu:cabinet", menu_payloads)
+        self.assertNotIn("menu:quiz", menu_payloads)
+        self.assertNotIn("menu:errors", menu_payloads)
         opened = menu_keyboard(True, "ideya_fiks_60_bot")
         with_cabinet = [
             button.payload for row in opened.payload.buttons for button in row if button.payload
@@ -565,7 +608,16 @@ class DatabaseTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("menu:own", with_cabinet)
         self.assertNotIn("menu:search", with_cabinet)
         self.assertNotIn("menu:notes", with_cabinet)
-        cabinet_button = opened.model_dump()["payload"]["buttons"][-1][0]
+        self.assertNotIn("menu:quiz", with_cabinet)
+        self.assertNotIn("menu:errors", with_cabinet)
+        dumped = opened.model_dump()["payload"]["buttons"]
+        quiz_button = dumped[-2][0]
+        self.assertEqual(quiz_button["type"], "open_app")
+        self.assertEqual(quiz_button["text"], "Квиз")
+        self.assertEqual(quiz_button["web_app"], "ideya_fiks_60_bot")
+        self.assertNotIn("contact_id", quiz_button)
+        self.assertNotIn("payload", quiz_button)
+        cabinet_button = dumped[-1][0]
         self.assertEqual(cabinet_button["type"], "open_app")
         self.assertEqual(cabinet_button["text"], "Кабинет")
         self.assertEqual(cabinet_button["web_app"], "ideya_fiks_60_bot")
@@ -585,6 +637,7 @@ class DatabaseTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(opener["type"], "open_app")
         self.assertEqual(opener["web_app"], "ideya_fiks_60_bot")
         edited = MessageForCallback(text="Меню", attachments=[opened, link])
+        counts = []
         for stored in edited.attachments:
             open_app = [
                 button
@@ -592,9 +645,11 @@ class DatabaseTests(unittest.IsolatedAsyncioTestCase):
                 for button in row
                 if button["type"] == "open_app"
             ]
-            self.assertEqual(len(open_app), 1)
-            self.assertNotIn("contact_id", open_app[0])
-            self.assertNotIn("payload", open_app[0])
+            counts.append(len(open_app))
+            for button in open_app:
+                self.assertNotIn("contact_id", button)
+                self.assertNotIn("payload", button)
+        self.assertEqual(counts, [2, 1])
         await self.db.set_explain_style(1, "short")
         self.assertIsNone(onboard_step(await self.db.get_user(1)))
 

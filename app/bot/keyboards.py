@@ -39,11 +39,15 @@ def _compact(markup):
     return compact
 
 
-def _cabinet_button(web_app: str = ""):
+def _app_button(text: str, web_app: str = ""):
     name = web_app.strip().lstrip("@")
     if name:
-        return OpenAppButton(text="Кабинет", web_app=name)
-    return OpenAppButton(text="Кабинет")
+        return OpenAppButton(text=text, web_app=name)
+    return OpenAppButton(text=text)
+
+
+def _cabinet_button(web_app: str = ""):
+    return _app_button("Кабинет", web_app)
 
 
 def menu_keyboard(cabinet: bool = False, web_app: str = ""):
@@ -56,10 +60,7 @@ def menu_keyboard(cabinet: bool = False, web_app: str = ""):
         ask,
         [CallbackButton(text="📝 Проверить решение", payload="menu:check")],
         notes,
-        [
-            CallbackButton(text="🎯 Квиз по теме", payload="menu:quiz"),
-            CallbackButton(text="🔁 Квиз по ошибкам", payload="menu:errors"),
-        ],
+        [_app_button("Квиз", web_app)],
     ]
     if cabinet:
         rows.append([_cabinet_button(web_app)])
@@ -80,7 +81,7 @@ def back_keyboard():
 def grade_keyboard():
     buttons = [
         CallbackButton(text=str(number), payload=f"grade:{number}")
-        for number in range(1, 12)
+        for number in range(5, 12)
     ]
     return _markup(buttons[:4], buttons[4:8], buttons[8:])
 

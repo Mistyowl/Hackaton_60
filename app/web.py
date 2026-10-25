@@ -3,16 +3,25 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 
+from app.bot.render import EMPTY_ERRORS
 from app.config import ACCESS_CLOSED, user_allowed
 from app.db import CABINET_SESSION_MINUTES, Database
 from app.services.notes import search_notes
-from app.services.tutor import Tutor
+from app.services.quiz import (
+    answer_question,
+    ensure_topic,
+    question_options,
+    start_error_quiz,
+    start_topic_quiz,
+)
+from app.services.tutor import Tutor, TutorError
 from app.webapp import validate_init_data
 
 log = logging.getLogger(__name__)
 PAGE = (Path(__file__).resolve().parent / "cabinet.html").read_text(encoding="utf-8")
+LUMI_MARK = Path(__file__).resolve().parent / "assets" / "lumi-mark.png"
 COOKIE = "cabinet"
 
 
@@ -41,6 +50,10 @@ def create_app(
     @app.get("/", response_class=HTMLResponse)
     async def index() -> str:
         return PAGE
+
+    @app.get("/assets/lumi-mark.png")
+    async def lumi_mark() -> FileResponse:
+        return FileResponse(LUMI_MARK, media_type="image/png")
 
     @app.post("/api/session")
     async def open_session(request: Request) -> JSONResponse:
@@ -150,11 +163,98 @@ def create_app(
             for row in rows
         ]
 
+    @app.post("/api/quizzes/topic")
+    async def quiz_topic(request: Request) -> dict:
+        user = await student(request)
+        body = await _json_body(request)
+        raw = body.get("topic")
+        if not isinstance(raw, str):
+            raise HTTPException(status_code=400, detail="Напишите тему квиза.")
+        try:
+            topic = ensure_topic(raw)
+        except TutorError as error:
+            raise HTTPException(status_code=400, detail=error.user_message) from None
+        try:
+            quiz_id = await start_topic_quiz(db, tutor, int(user["user_id"]), topic)
+        except TutorError as error:
+            raise HTTPException(status_code=502, detail=error.user_message) from None
+        return await _quiz_payload(db, quiz_id)
+
+    @app.post("/api/quizzes/errors")
+    async def quiz_errors(request: Request) -> dict:
+        user = await student(request)
+        try:
+            quiz_id = await start_error_quiz(db, tutor, int(user["user_id"]))
+        except TutorError as error:
+            raise HTTPException(status_code=502, detail=error.user_message) from None
+        if quiz_id is None:
+            raise HTTPException(status_code=409, detail=EMPTY_ERRORS)
+        return await _quiz_payload(db, quiz_id)
+
+    @app.post("/api/quizzes/answer")
+    async def quiz_answer(request: Request) -> dict:
+        user = await student(request)
+        body = await _json_body(request)
+        question_id = body.get("question_id")
+        option = body.get("option")
+        if isinstance(question_id, bool) or isinstance(option, bool):
+            raise HTTPException(status_code=400, detail="Нужен номер вопроса и вариант.")
+        if not isinstance(question_id, int) or not isinstance(option, int):
+            raise HTTPException(status_code=400, detail="Нужен номер вопроса и вариант.")
+        view = await answer_question(db, int(user["user_id"]), question_id, option)
+        if view.missing:
+            raise HTTPException(status_code=404, detail="Этот вопрос уже недоступен.")
+        if view.already_closed:
+            detail = "Этот квиз уже закрыт." if view.closed_quiz else "Эта задача уже закрыта."
+            raise HTTPException(status_code=409, detail=detail)
+        return {
+            "title": view.quiz_title,
+            "done": view.done,
+            "total": view.total,
+            "finished": view.finished or view.next_question is None,
+            "feedback": {"correct": view.correct, "explanation": view.explanation},
+            "question": _public_question(view.next_question),
+        }
+
     return app
 
 
 def _now() -> float:
     return datetime.now(timezone.utc).timestamp()
+
+
+async def _json_body(request: Request) -> dict:
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Нужны данные квиза.") from None
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="Нужны данные квиза.")
+    return body
+
+
+def _public_question(question: dict | None) -> dict | None:
+    if question is None:
+        return None
+    return {
+        "id": question["id"],
+        "prompt": question["prompt"],
+        "options": question_options(question),
+    }
+
+
+async def _quiz_payload(db: Database, quiz_id: int) -> dict:
+    quiz = await db.get_quiz(quiz_id)
+    question = await db.next_pending(quiz_id)
+    done, total = await db.quiz_counts(quiz_id)
+    return {
+        "title": quiz["title"] if quiz else "",
+        "done": done,
+        "total": total,
+        "finished": question is None,
+        "feedback": None,
+        "question": _public_question(question),
+    }
 
 
 def _short(value: str, limit: int = 180) -> str:

@@ -335,7 +335,7 @@ class BotApp:
         await self.show(event, STYLE_PROMPT, style_keyboard())
 
     async def _accept_grade(self, event: MessageCallback, user_id: int, grade: int | None) -> None:
-        if grade is None or not 1 <= grade <= 11:
+        if grade is None or not 5 <= grade <= 11:
             await self._show_onboarding(event, user_id, "grade")
             return
         await self.db.set_grade(user_id, grade)
@@ -401,7 +401,7 @@ class BotApp:
         await self.send(chat_id, user_id, "Такой команды нет. Выберите действие в меню.", self._menu())
 
     async def _handle_tutor(self, chat_id, user_id: int, text: str) -> None:
-        await self.send(chat_id, user_id, "Разбираю вопрос.", None)
+        await self.send(chat_id, user_id, "Думаю...", None)
         history = await self.db.recent_messages(user_id)
         dossier = await student_dossier(self.db, user_id)
         try:
@@ -713,7 +713,7 @@ class BotApp:
         await self.send(
             chat_id,
             user_id,
-            "Кабинет откроется вашим: конспекты, поиск и ошибки.",
+            "Кабинет откроется вашим: конспекты и поиск.",
             cabinet_keyboard(self.web_app),
         )
 

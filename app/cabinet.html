@@ -6,111 +6,199 @@
   <title>Кабинет</title>
   <style>
     :root {
-      color-scheme: light;
-      --paper: #f4efe4;
-      --card: #fffdf8;
-      --ink: #1d1a16;
-      --muted: #6d6458;
-      --line: #e2d8c8;
-      --green: #1f4b3a;
-      --mark: #ffe08a;
+      color-scheme: dark;
+      --bg: #160d33;
+      --card: #2a1b55;
+      --ink: #ffffff;
+      --muted: #b7a6d6;
+      --accent: #7b4dff;
+      --icon: #3a2774;
+      --danger: #e23b3b;
     }
     * { box-sizing: border-box; }
     body {
       margin: 0;
       font-family: "Segoe UI", sans-serif;
-      background: var(--paper);
+      background: var(--bg);
       color: var(--ink);
     }
     main {
       max-width: 440px;
       margin: 0 auto;
-      padding: 28px 18px 64px;
+      padding: 22px 16px 64px;
+    }
+    .hero {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 12px;
     }
     h1 {
-      font-family: Georgia, "Times New Roman", serif;
-      font-weight: 600;
-      font-size: 36px;
-      margin: 0 0 8px;
+      margin: 0;
+      font-size: 34px;
+      font-weight: 700;
+      letter-spacing: -0.03em;
     }
-    p.lead { margin: 0; color: var(--muted); line-height: 1.45; }
-    label { display: block; font-size: 14px; margin-bottom: 6px; color: var(--muted); }
+    .mascot { width: 96px; height: 96px; flex: none; object-fit: contain; }
+    p.lead { margin: 8px 0 0; color: var(--muted); line-height: 1.4; }
     input, button { font: inherit; color: inherit; }
-    input {
-      width: 100%;
-      border: 1px solid var(--line);
-      background: white;
-      border-radius: 10px;
+    .search {
+      display: flex;
+      gap: 8px;
+      margin-top: 18px;
+    }
+    .search input {
+      flex: 1;
+      min-width: 0;
+      border: 0;
+      background: #241447;
+      border-radius: 14px;
       padding: 12px 14px;
     }
-    .row { display: flex; gap: 8px; }
-    .row input { flex: 1; min-width: 0; }
+    .search input::placeholder { color: #8d7aaf; }
     button {
       border: 0;
-      background: var(--green);
+      background: var(--accent);
       color: white;
-      border-radius: 10px;
+      border-radius: 14px;
       padding: 12px 16px;
       cursor: pointer;
     }
-    button.delete {
-      margin-top: 12px;
+    button:disabled { opacity: 0.6; cursor: default; }
+    section { margin-top: 26px; }
+    .section-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 12px;
+    }
+    h2 { font-size: 22px; margin: 0; }
+    #results-title { margin-bottom: 12px; }
+    button.link {
       background: transparent;
-      color: var(--green);
-      border: 1px solid var(--line);
-      padding: 8px 12px;
+      color: var(--muted);
+      padding: 0;
+      font-size: 16px;
     }
-    section { margin-top: 28px; }
-    h2 { font-size: 20px; margin: 0 0 12px; }
-    article {
-      background: var(--card);
-      border: 1px solid var(--line);
-      border-radius: 14px;
-      padding: 14px 16px;
+    .swipe {
+      position: relative;
       margin-bottom: 10px;
+      border-radius: 18px;
+      overflow: hidden;
     }
-    article.note { cursor: pointer; }
-    article h3 { margin: 0 0 4px; font-size: 18px; }
-    .meta { color: var(--muted); font-size: 13px; margin-bottom: 8px; }
-    .snippet { line-height: 1.5; white-space: pre-wrap; }
-    mark {
-      background: var(--mark);
-      color: inherit;
-      padding: 0 0.15em;
-      border-radius: 0.2em;
+    .trash {
+      position: absolute;
+      top: 0;
+      right: 0;
+      bottom: 0;
+      width: 72px;
+      border-radius: 0;
+      background: var(--danger);
+      display: grid;
+      place-items: center;
     }
-    .badge {
-      display: inline-block;
+    .face {
+      position: relative;
+      background: var(--card);
+      border-radius: 18px;
+      transition: transform 0.18s ease;
+      touch-action: pan-y;
+    }
+    .swipe.open-swipe .face { transform: translateX(-72px); }
+    .card {
+      display: grid;
+      grid-template-columns: 44px 1fr 16px;
+      gap: 12px;
+      align-items: center;
+      padding: 14px;
+    }
+    .icon {
+      width: 44px;
+      height: 44px;
+      border-radius: 14px;
+      background: var(--icon);
+      display: grid;
+      place-items: center;
+      color: #d7c8ff;
+    }
+    .glyph { font-size: 22px; line-height: 1; }
+    .card h3 { margin: 0 0 2px; font-size: 16px; font-weight: 650; }
+    .meta { color: var(--muted); font-size: 13px; }
+    .snippet {
       margin-top: 8px;
-      font-size: 12px;
-      color: var(--green);
+      line-height: 1.45;
+      white-space: pre-wrap;
+      color: #efe8ff;
     }
-    .empty { color: var(--muted); }
-    .error { color: #8d2d2d; }
-    #who { margin: 0 0 4px; }
+    .chev { color: var(--muted); font-size: 22px; line-height: 1; }
+    mark {
+      background: transparent;
+      color: inherit;
+      text-decoration: underline;
+      text-underline-offset: 2px;
+    }
+    .badge { display: inline-block; margin-top: 8px; font-size: 12px; color: #c4b0ff; }
+    .empty, #quiz-status { color: var(--muted); }
+    .error { color: #ffb4b4; }
+    #quiz-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+    #quiz-actions input {
+      flex: 1;
+      min-width: 140px;
+      border: 0;
+      background: #241447;
+      border-radius: 14px;
+      padding: 12px 14px;
+    }
+    #quiz-play { margin-top: 14px; }
+    #quiz-play h3 { margin: 0 0 6px; }
+    #quiz-play .options button {
+      display: block;
+      width: 100%;
+      margin-top: 8px;
+      text-align: left;
+      background: var(--card);
+      color: var(--ink);
+    }
+    .feedback { margin: 0 0 10px; line-height: 1.45; }
+    .feedback.ok { color: #b7f0c8; }
+    .feedback.bad { color: #ffb4b4; }
   </style>
 </head>
 <body>
   <main>
-    <h1>Кабинет</h1>
-    <p id="who" class="lead" hidden></p>
+    <header class="hero">
+      <div>
+        <h1>Кабинет</h1>
+        <p id="who" class="lead" hidden></p>
+      </div>
+      <img class="mascot" src="/assets/lumi-mark.png" alt="">
+    </header>
     <p id="gate" class="lead">Откройте кабинет кнопкой в чате MAX.</p>
     <div id="cabinet" hidden>
+      <form id="search-form" class="search">
+        <input id="query" type="search" placeholder="Слово или фраза" autocomplete="off">
+        <button type="submit">Найти</button>
+      </form>
       <section>
-        <h2>Поиск</h2>
-        <form id="search-form" class="row">
-          <input id="query" type="search" placeholder="Слово или фраза" autocomplete="off">
-          <button type="submit">Найти</button>
-        </form>
+        <h2 id="results-title" hidden>Результаты поиска</h2>
         <div id="results"></div>
       </section>
       <section>
-        <h2>Конспекты</h2>
+        <div class="section-head">
+          <h2>Конспекты</h2>
+          <button type="button" class="link" id="show-all" hidden>Все &gt;</button>
+        </div>
         <div id="notes"></div>
       </section>
       <section>
-        <h2>Ошибки</h2>
-        <div id="errors"></div>
+        <h2>Квиз</h2>
+        <div id="quiz-actions">
+          <button type="button" id="quiz-errors">По ошибкам</button>
+          <input id="quiz-topic" type="text" placeholder="Тема, например: дроби" autocomplete="off">
+          <button type="button" id="quiz-by-topic">По теме</button>
+        </div>
+        <p id="quiz-status" class="empty"></p>
+        <div id="quiz-play" hidden></div>
       </section>
     </div>
   </main>
@@ -118,14 +206,28 @@
   <script>
     const LOCKED = "Откройте кабинет кнопкой в чате MAX.";
     const notesBox = document.querySelector("#notes");
-    const errorsBox = document.querySelector("#errors");
     const resultsBox = document.querySelector("#results");
+    const resultsTitle = document.querySelector("#results-title");
     const queryInput = document.querySelector("#query");
     const gate = document.querySelector("#gate");
     const cabinet = document.querySelector("#cabinet");
     const who = document.querySelector("#who");
+    const showAll = document.querySelector("#show-all");
+    const quizStatus = document.querySelector("#quiz-status");
+    const quizPlay = document.querySelector("#quiz-play");
+    const quizTopic = document.querySelector("#quiz-topic");
+    const quizActions = document.querySelector("#quiz-actions");
     const previews = new Map();
     const opened = new Map();
+    let allNotes = [];
+    let notesExpanded = false;
+    let swipeMoved = false;
+
+    const ICONS = {
+      pi: '<span class="glyph">π</span>',
+      globe: '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="8"/><path d="M4 12h16M12 4c2.5 2.8 2.5 13.2 0 16M12 4c-2.5 2.8-2.5 13.2 0 16"/></svg>',
+      book: '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M5 5.5A2.5 2.5 0 0 1 7.5 3H19v16H7.5A2.5 2.5 0 0 0 5 21.5z"/><path d="M5 5.5A2.5 2.5 0 0 1 7.5 8H19"/></svg>'
+    };
 
     function escapeHtml(value) {
       return String(value ?? "").replace(/[&<>]/g, (char) => ({
@@ -151,6 +253,13 @@
       return polish(html);
     }
 
+    function subjectKind(subject) {
+      const text = String(subject || "").toLowerCase();
+      if (/алгебр|матем|геометр|уравнен/.test(text)) return "pi";
+      if (/обществ|истори|географ/.test(text)) return "globe";
+      return "book";
+    }
+
     function showGate(text) {
       cabinet.hidden = true;
       who.hidden = true;
@@ -170,45 +279,57 @@
       if (profile.grade != null) parts.push(profile.grade + " класс");
       const style = { short: "короче", detail: "подробнее" }[profile.explain_style];
       if (style) parts.push(style);
-      who.textContent = parts.join(" · ");
+      who.textContent = parts.join(" · ") + " >";
       who.hidden = parts.length === 0;
     }
 
+    function noteCard(note) {
+      const id = String(note.id);
+      previews.set(id, note.preview || "");
+      const open = opened.has(id);
+      const snippet = open ? highlight(opened.get(id) || "", queryInput.value) : "";
+      return `
+        <div class="swipe" data-id="${escapeHtml(note.id)}">
+          <button type="button" class="trash" aria-label="Удалить">
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="1.8"><path d="M4 7h16M9 7V5h6v2M8 7l1 13h6l1-13"/></svg>
+          </button>
+          <article class="face card note">
+            <div class="icon">${ICONS[subjectKind(note.subject)]}</div>
+            <div>
+              <h3>${polish(escapeHtml(note.title))}</h3>
+              <div class="meta">${escapeHtml(note.subject || "без предмета")}</div>
+              <div class="snippet"${open ? "" : " hidden"}>${snippet}</div>
+            </div>
+            <span class="chev">›</span>
+          </article>
+        </div>
+      `;
+    }
+
     function renderNotes(notes) {
+      allNotes = notes;
+      notesExpanded = false;
       previews.clear();
       opened.clear();
-      if (!notes.length) {
+      paintNotes();
+    }
+
+    function paintNotes() {
+      if (!allNotes.length) {
+        showAll.hidden = true;
         notesBox.innerHTML = '<p class="empty">Конспекты появятся, когда в чате нажмёте «В конспект».</p>';
         return;
       }
-      notesBox.innerHTML = notes.map((note) => {
-        previews.set(String(note.id), note.preview || "");
-        return `
-          <article class="note" data-id="${escapeHtml(note.id)}">
-            <h3>${polish(escapeHtml(note.title))}</h3>
-            <div class="meta">${escapeHtml(note.subject || "без предмета")}</div>
-            <div class="snippet">${highlight(note.preview || "", queryInput.value)}</div>
-          </article>
-        `;
-      }).join("");
-    }
-
-    function renderErrors(errors) {
-      if (!errors.length) {
-        errorsBox.innerHTML = '<p class="empty">Ошибки появятся после проверки решения с ошибкой.</p>';
-        return;
-      }
-      errorsBox.innerHTML = errors.map((item) => `
-        <article>
-          <h3>${escapeHtml(item.mistake)}</h3>
-          <div class="meta">${escapeHtml(item.subject || "предмет не указан")}</div>
-          <div class="snippet">${escapeHtml(item.problem || "")}</div>
-        </article>
-      `).join("");
+      const visible = notesExpanded ? allNotes : allNotes.slice(0, 3);
+      showAll.hidden = allNotes.length <= 3 || notesExpanded;
+      notesBox.innerHTML = visible.map(noteCard).join("");
+      bindSwipe();
     }
 
     function renderResults(hits, query) {
-      if (!query.trim()) {
+      const active = Boolean(query.trim());
+      resultsTitle.hidden = !active;
+      if (!active) {
         resultsBox.innerHTML = "";
         return;
       }
@@ -217,11 +338,15 @@
         return;
       }
       resultsBox.innerHTML = hits.map((hit) => `
-        <article>
-          <h3>${highlight(hit.title, query)}</h3>
-          <div class="meta">${escapeHtml(hit.subject || "без предмета")}</div>
-          <div class="snippet">${highlight(hit.snippet, query)}</div>
-          ${hit.semantic ? '<div class="badge">Совпадение по смыслу</div>' : ""}
+        <article class="card">
+          <div class="icon">${ICONS[subjectKind(hit.subject)]}</div>
+          <div>
+            <h3>${highlight(hit.title, query)}</h3>
+            <div class="meta">${escapeHtml(hit.subject || "без предмета")}</div>
+            <div class="snippet">${highlight(hit.snippet, query)}</div>
+            ${hit.semantic ? '<div class="badge">Совпадение по смыслу</div>' : ""}
+          </div>
+          <span class="chev">›</span>
         </article>
       `).join("");
     }
@@ -237,21 +362,17 @@
         return;
       }
       renderProfile(await profileResponse.json());
-      const [notesResponse, errorsResponse] = await Promise.all([
-        fetch("/api/notes"),
-        fetch("/api/errors")
-      ]);
-      if (notesResponse.status === 401 || errorsResponse.status === 401) {
+      const notesResponse = await fetch("/api/notes");
+      if (notesResponse.status === 401) {
         showGate(LOCKED);
         return;
       }
-      if (!notesResponse.ok || !errorsResponse.ok) {
+      if (!notesResponse.ok) {
         showGate("Кабинет не смог открыть базу.");
         return;
       }
       const notesPayload = await notesResponse.json();
       renderNotes(notesPayload.notes || []);
-      renderErrors(await errorsResponse.json());
       showCabinet();
     }
 
@@ -268,6 +389,7 @@
         return;
       }
       if (!response.ok) {
+        resultsTitle.hidden = false;
         resultsBox.innerHTML = '<p class="error">Поиск не ответил.</p>';
         return;
       }
@@ -276,25 +398,17 @@
     });
 
     function renderNotesFromCache() {
-      notesBox.querySelectorAll("article.note").forEach((article) => {
-        const id = article.dataset.id;
-        const snippet = article.querySelector(".snippet");
-        const text = opened.get(id) || previews.get(id) || "";
-        snippet.innerHTML = highlight(text, queryInput.value);
+      notesBox.querySelectorAll(".swipe").forEach((row) => {
+        const id = row.dataset.id;
+        const snippet = row.querySelector(".snippet");
+        const open = opened.has(id);
+        snippet.hidden = !open;
+        snippet.innerHTML = highlight(open ? opened.get(id) || "" : "", queryInput.value);
       });
     }
 
-    function showDelete(article) {
-      if (article.querySelector("button.delete")) return;
-      const button = document.createElement("button");
-      button.type = "button";
-      button.className = "delete";
-      button.textContent = "Удалить";
-      article.append(button);
-    }
-
-    async function deleteNote(article) {
-      const id = article.dataset.id;
+    async function deleteNote(row) {
+      const id = row.dataset.id;
       const response = await fetch("/api/notes/" + encodeURIComponent(id), { method: "DELETE" });
       if (response.status === 401) {
         showGate(LOCKED);
@@ -303,25 +417,75 @@
       if (!response.ok) return;
       previews.delete(id);
       opened.delete(id);
-      article.remove();
-      if (!notesBox.querySelector("article.note")) {
-        notesBox.innerHTML = '<p class="empty">Конспекты появятся, когда в чате нажмёте «В конспект».</p>';
-      }
+      allNotes = allNotes.filter((note) => String(note.id) !== id);
+      paintNotes();
+    }
+
+    function bindSwipe() {
+      notesBox.querySelectorAll(".swipe").forEach((row) => {
+        const face = row.querySelector(".face");
+        let startX = 0;
+        let startY = 0;
+        let base = 0;
+        let dragging = false;
+        let axis = "";
+        face.addEventListener("pointerdown", (event) => {
+          if (event.target.closest("button")) return;
+          dragging = true;
+          axis = "";
+          startX = event.clientX;
+          startY = event.clientY;
+          base = row.classList.contains("open-swipe") ? -72 : 0;
+          face.setPointerCapture(event.pointerId);
+        });
+        face.addEventListener("pointermove", (event) => {
+          if (!dragging) return;
+          const mx = event.clientX - startX;
+          const my = event.clientY - startY;
+          if (!axis && Math.hypot(mx, my) > 6) axis = Math.abs(mx) > Math.abs(my) ? "x" : "y";
+          if (axis !== "x") return;
+          const next = Math.min(0, Math.max(-84, base + mx));
+          face.style.transform = "translateX(" + next + "px)";
+        });
+        face.addEventListener("pointerup", (event) => {
+          if (!dragging) return;
+          dragging = false;
+          const mx = event.clientX - startX;
+          face.style.transform = "";
+          if (axis === "x") {
+            swipeMoved = true;
+            row.classList.toggle("open-swipe", base + mx < -40);
+          }
+          axis = "";
+        });
+        face.addEventListener("pointercancel", () => {
+          dragging = false;
+          face.style.transform = "";
+        });
+      });
     }
 
     notesBox.addEventListener("click", async (event) => {
-      const article = event.target.closest("article.note");
-      if (!article) return;
-      if (event.target.closest("button.delete")) {
-        await deleteNote(article);
+      const row = event.target.closest(".swipe");
+      if (!row) return;
+      if (event.target.closest(".trash")) {
+        await deleteNote(row);
         return;
       }
-      const id = article.dataset.id;
-      const snippet = article.querySelector(".snippet");
+      if (swipeMoved) {
+        swipeMoved = false;
+        return;
+      }
+      if (row.classList.contains("open-swipe")) {
+        row.classList.remove("open-swipe");
+        return;
+      }
+      const id = row.dataset.id;
+      const snippet = row.querySelector(".snippet");
       if (opened.has(id)) {
         opened.delete(id);
-        article.querySelector("button.delete")?.remove();
-        snippet.innerHTML = highlight(previews.get(id) || "", queryInput.value);
+        snippet.hidden = true;
+        snippet.innerHTML = "";
         return;
       }
       const response = await fetch("/api/notes/" + encodeURIComponent(id));
@@ -332,8 +496,120 @@
       if (!response.ok) return;
       const note = await response.json();
       opened.set(id, note.body || "");
+      snippet.hidden = false;
       snippet.innerHTML = highlight(note.body || "", queryInput.value);
-      showDelete(article);
+    });
+
+    showAll.addEventListener("click", () => {
+      notesExpanded = true;
+      paintNotes();
+    });
+
+    function setQuizBusy(busy) {
+      quizActions.querySelectorAll("button, input").forEach((control) => {
+        control.disabled = busy;
+      });
+    }
+
+    function renderQuiz(data) {
+      const feedback = data.feedback;
+      const question = data.question;
+      if (data.finished || !question) {
+        const note = feedback
+          ? (feedback.correct ? "Верно. " : "Пока неверно. ") + (feedback.explanation || "")
+          : "";
+        quizPlay.hidden = false;
+        quizPlay.innerHTML = `
+          <h3>${escapeHtml(data.title || "Квиз")}</h3>
+          <p class="feedback ${feedback && feedback.correct ? "ok" : "bad"}">${escapeHtml(note)}</p>
+          <p>Квиз пройден. Закрыто ${escapeHtml(data.done)} из ${escapeHtml(data.total)}.</p>
+        `;
+        return;
+      }
+      const note = feedback
+        ? `<p class="feedback ${feedback.correct ? "ok" : "bad"}">${escapeHtml(
+            (feedback.correct ? "Верно. " : "Пока неверно. ") + (feedback.explanation || "")
+          )}</p>`
+        : "";
+      const options = (question.options || []).map((option, index) => `
+        <button type="button" data-option="${index}">${escapeHtml(option)}</button>
+      `).join("");
+      quizPlay.hidden = false;
+      quizPlay.innerHTML = `
+        <h3>${escapeHtml(data.title || "Квиз")}</h3>
+        <p class="meta">Закрыто ${escapeHtml(data.done)} из ${escapeHtml(data.total)}</p>
+        ${note}
+        <p>${escapeHtml(question.prompt || "")}</p>
+        <div class="options" data-question="${escapeHtml(question.id)}">${options}</div>
+      `;
+    }
+
+    async function startQuiz(url, body) {
+      setQuizBusy(true);
+      quizStatus.textContent = "Собираю квиз";
+      quizPlay.hidden = true;
+      try {
+        const response = await fetch(url, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body || {})
+        });
+        if (response.status === 401) {
+          showGate(LOCKED);
+          return;
+        }
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) {
+          quizStatus.textContent = typeof data.detail === "string" ? data.detail : "Квиз не собрался.";
+          return;
+        }
+        quizStatus.textContent = "";
+        renderQuiz(data);
+      } finally {
+        setQuizBusy(false);
+      }
+    }
+
+    document.querySelector("#quiz-errors").addEventListener("click", () => {
+      startQuiz("/api/quizzes/errors");
+    });
+
+    document.querySelector("#quiz-by-topic").addEventListener("click", () => {
+      startQuiz("/api/quizzes/topic", { topic: quizTopic.value });
+    });
+
+    quizPlay.addEventListener("click", async (event) => {
+      const button = event.target.closest("button[data-option]");
+      if (!button) return;
+      const questionId = Number(button.parentElement.dataset.question);
+      const option = Number(button.dataset.option);
+      setQuizBusy(true);
+      quizPlay.querySelectorAll("button").forEach((item) => {
+        item.disabled = true;
+      });
+      try {
+        const response = await fetch("/api/quizzes/answer", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ question_id: questionId, option })
+        });
+        if (response.status === 401) {
+          showGate(LOCKED);
+          return;
+        }
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) {
+          quizStatus.textContent = typeof data.detail === "string" ? data.detail : "Ответ не принят.";
+          quizPlay.querySelectorAll("button").forEach((item) => {
+            item.disabled = false;
+          });
+          return;
+        }
+        quizStatus.textContent = "";
+        renderQuiz(data);
+      } finally {
+        setQuizBusy(false);
+      }
     });
 
     async function enter() {
