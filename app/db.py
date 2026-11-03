@@ -1,13 +1,16 @@
 import json
 import secrets
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import aiosqlite
 
 from app.textutil import MARK_START, utcnow
 
 CABINET_SESSION_MINUTES = 45
+WEEK_GOAL = 5
+_MOSCOW = ZoneInfo("Europe/Moscow")
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS users (
@@ -16,6 +19,7 @@ CREATE TABLE IF NOT EXISTS users (
     created_at TEXT NOT NULL,
     grade INTEGER,
     explain_style TEXT,
+    exam_goal TEXT,
     chat_id INTEGER,
     reminders INTEGER NOT NULL DEFAULT 1,
     last_reminder_on TEXT
@@ -171,6 +175,16 @@ CREATE TABLE IF NOT EXISTS cabinet_sessions (
 """
 
 
+def _moscow_day(value: str) -> date | None:
+    try:
+        moment = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=timezone.utc)
+    return moment.astimezone(_MOSCOW).date()
+
+
 class Database:
     def __init__(self, path: str) -> None:
         self.path = path
@@ -213,6 +227,8 @@ class Database:
             )
         if "last_reminder_on" not in have:
             await self.conn.execute("ALTER TABLE users ADD COLUMN last_reminder_on TEXT")
+        if "exam_goal" not in have:
+            await self.conn.execute("ALTER TABLE users ADD COLUMN exam_goal TEXT")
 
     async def _ensure_note_columns(self) -> None:
         cursor = await self.conn.execute("PRAGMA table_info(notes)")
@@ -272,14 +288,22 @@ class Database:
 
     async def get_user(self, user_id: int) -> dict:
         cursor = await self.conn.execute(
-            "SELECT user_id, first_name, grade, explain_style, chat_id, reminders, last_reminder_on FROM users WHERE user_id = ?",
+            """
+            SELECT user_id, first_name, grade, explain_style, exam_goal,
+                   chat_id, reminders, last_reminder_on
+            FROM users WHERE user_id = ?
+            """,
             (user_id,),
         )
         row = await cursor.fetchone()
         if row is None:
             await self.upsert_user(user_id, "")
             cursor = await self.conn.execute(
-                "SELECT user_id, first_name, grade, explain_style, chat_id, reminders, last_reminder_on FROM users WHERE user_id = ?",
+                """
+                SELECT user_id, first_name, grade, explain_style, exam_goal,
+                       chat_id, reminders, last_reminder_on
+                FROM users WHERE user_id = ?
+                """,
                 (user_id,),
             )
             row = await cursor.fetchone()
@@ -292,11 +316,23 @@ class Database:
         )
         await self.conn.commit()
 
-    async def set_profile(self, user_id: int, first_name: str, grade: int) -> None:
-        await self.conn.execute(
-            "UPDATE users SET first_name = ?, grade = ? WHERE user_id = ?",
-            (first_name, grade, user_id),
-        )
+    async def set_profile(
+        self,
+        user_id: int,
+        first_name: str,
+        grade: int,
+        exam_goal: str | None = None,
+    ) -> None:
+        if exam_goal is None:
+            await self.conn.execute(
+                "UPDATE users SET first_name = ?, grade = ? WHERE user_id = ?",
+                (first_name, grade, user_id),
+            )
+        else:
+            await self.conn.execute(
+                "UPDATE users SET first_name = ?, grade = ?, exam_goal = ? WHERE user_id = ?",
+                (first_name, grade, exam_goal, user_id),
+            )
         await self.conn.commit()
 
     async def set_explain_style(self, user_id: int, style: str) -> None:
@@ -306,9 +342,20 @@ class Database:
         )
         await self.conn.commit()
 
+    async def set_exam_goal(self, user_id: int, goal: str) -> None:
+        await self.conn.execute(
+            "UPDATE users SET exam_goal = ? WHERE user_id = ?",
+            (goal, user_id),
+        )
+        await self.conn.commit()
+
     async def find_user(self, user_id: int) -> dict | None:
         cursor = await self.conn.execute(
-            "SELECT user_id, first_name, grade, explain_style, chat_id, reminders, last_reminder_on FROM users WHERE user_id = ?",
+            """
+            SELECT user_id, first_name, grade, explain_style, exam_goal,
+                   chat_id, reminders, last_reminder_on
+            FROM users WHERE user_id = ?
+            """,
             (user_id,),
         )
         row = await cursor.fetchone()
@@ -332,7 +379,7 @@ class Database:
         cursor = await self.conn.execute(
             """
             SELECT users.user_id, users.first_name, users.grade, users.explain_style,
-                   users.chat_id, users.reminders, users.last_reminder_on
+                   users.exam_goal, users.chat_id, users.reminders, users.last_reminder_on
             FROM cabinet_sessions
             JOIN users ON users.user_id = cabinet_sessions.user_id
             WHERE cabinet_sessions.token = ? AND cabinet_sessions.expires_at > ?
@@ -613,6 +660,22 @@ class Database:
         )
         return [dict(row) for row in await cursor.fetchall()]
 
+    async def list_error_bank(self, user_id: int, limit: int = 40) -> list[dict]:
+        cursor = await self.conn.execute(
+            """
+            SELECT id, subject, problem, mistake, explanation, skill_id,
+                   resolved_at, created_at
+            FROM errors
+            WHERE user_id = ?
+            ORDER BY
+              CASE WHEN resolved_at IS NULL THEN 0 ELSE 1 END,
+              id DESC
+            LIMIT ?
+            """,
+            (user_id, limit),
+        )
+        return [dict(row) for row in await cursor.fetchall()]
+
     async def count_errors(self, user_id: int) -> int:
         cursor = await self.conn.execute(
             "SELECT COUNT(*) AS total FROM errors WHERE user_id = ? AND resolved_at IS NULL",
@@ -620,6 +683,76 @@ class Database:
         )
         row = await cursor.fetchone()
         return int(row["total"])
+
+    async def count_closed_errors(self, user_id: int) -> int:
+        cursor = await self.conn.execute(
+            "SELECT COUNT(*) AS total FROM errors WHERE user_id = ? AND resolved_at IS NOT NULL",
+            (user_id,),
+        )
+        row = await cursor.fetchone()
+        return int(row["total"])
+
+    async def profile_stats(self, user_id: int) -> dict:
+        cursor = await self.conn.execute(
+            """
+            SELECT COUNT(*) AS total FROM quizzes
+            WHERE user_id = ? AND status = 'done'
+            """,
+            (user_id,),
+        )
+        quizzes_done = int((await cursor.fetchone())["total"])
+        closed_errors = await self.count_closed_errors(user_id)
+        cursor = await self.conn.execute(
+            """
+            SELECT
+              SUM(CASE WHEN quiz_questions.status = 'done' AND quiz_questions.attempts = 1 THEN 1 ELSE 0 END) AS first_ok,
+              SUM(CASE WHEN quiz_questions.status = 'done' THEN 1 ELSE 0 END) AS answered
+            FROM quiz_questions
+            JOIN quizzes ON quizzes.id = quiz_questions.quiz_id
+            WHERE quizzes.user_id = ?
+            """,
+            (user_id,),
+        )
+        row = await cursor.fetchone()
+        answered = int(row["answered"] or 0)
+        first_ok = int(row["first_ok"] or 0)
+        accuracy = round(100 * first_ok / answered) if answered else 0
+        home = await self.home_stats(user_id, datetime.now(_MOSCOW).date())
+        return {
+            "quizzes_done": quizzes_done,
+            "closed_errors": closed_errors,
+            "accuracy": accuracy,
+            "streak_days": home["streak_days"],
+        }
+
+    async def home_stats(self, user_id: int, today: date) -> dict:
+        open_errors = await self.count_errors(user_id)
+        cursor = await self.conn.execute(
+            """
+            SELECT finished_at FROM quizzes
+            WHERE user_id = ? AND status = 'done' AND finished_at IS NOT NULL
+            """,
+            (user_id,),
+        )
+        finished: list[date] = []
+        for row in await cursor.fetchall():
+            day = _moscow_day(row["finished_at"])
+            if day is not None:
+                finished.append(day)
+        days = set(finished)
+        streak = 0
+        cursor_day = today if today in days else today - timedelta(days=1)
+        while cursor_day in days:
+            streak += 1
+            cursor_day -= timedelta(days=1)
+        week_start = today - timedelta(days=today.weekday())
+        week_done = sum(1 for day in finished if week_start <= day <= today)
+        return {
+            "open_errors": open_errors,
+            "streak_days": streak,
+            "week_done": week_done,
+            "week_goal": WEEK_GOAL,
+        }
 
     async def insert_check(self, user_id: int, fields: dict) -> int:
         cursor = await self.conn.execute(

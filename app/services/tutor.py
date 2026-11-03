@@ -361,16 +361,16 @@ class Tutor:
         else:
             user_text = "Тема квиза: " + (topic or "школьная математика")
             title = fallback or topic or "Квиз"
-        if wanted < 6:
-            user_text += f"\nНужно вопросов: {wanted}."
+        user_text += f"\nНужно ровно {wanted} вопросов."
         last_error: Exception | None = None
+        # Один повтор: сбор квиза и так долгий из‑за модели.
         for _ in range(2):
             try:
                 data = await self._ask(
                     load_prompt("quiz.txt"),
                     self._text_contents([], user_text),
                     _QuizSchema,
-                    0.6,
+                    0.4,
                 )
                 return normalize_quiz(data, title[:120], wanted)
             except TutorError as error:

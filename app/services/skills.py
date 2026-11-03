@@ -151,13 +151,27 @@ def sky_payload(skills: list[dict], now: datetime | None = None) -> dict:
     }
 
 
+def _local_skill_match(key: str, known: list[dict]) -> tuple[int, str] | None:
+    if not key:
+        return None
+    for skill in known:
+        other = normalize_name(skill["name"])
+        if other == key:
+            return int(skill["id"]), skill["name"]
+    for skill in known:
+        other = normalize_name(skill["name"])
+        if other and min(len(key), len(other)) >= 4 and (key in other or other in key):
+            return int(skill["id"]), skill["name"]
+    return None
+
+
 async def _match_name(tutor: Tutor | None, raw: str, known: list[dict]) -> tuple[int | None, str]:
     cleaned = " ".join(raw.split()).strip()
     label = cleaned[:80] or "приём"
     key = normalize_name(label)
-    for skill in known:
-        if normalize_name(skill["name"]) == key and key:
-            return int(skill["id"]), skill["name"]
+    local = _local_skill_match(key, known)
+    if local is not None:
+        return local
     if tutor is None or not tutor.enabled or not known or not key:
         return None, label[:60]
     try:

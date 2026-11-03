@@ -29,16 +29,16 @@ def question_options(question: dict) -> list[str]:
     return [str(option) for option in options]
 
 
-async def start_topic_quiz(db: Database, tutor: Tutor, user_id: int, topic: str) -> int:
-    title, drafts = await tutor.make_quiz(topic=topic, errors=None, fallback=topic)
+async def start_topic_quiz(db: Database, tutor: Tutor, user_id: int, topic: str, wanted: int = 6) -> int:
+    title, drafts = await tutor.make_quiz(topic=topic, errors=None, fallback=topic, wanted=wanted)
     return await _save_quiz(db, user_id, title, "topic", drafts)
 
 
-async def start_note_quiz(db: Database, tutor: Tutor, user_id: int, note: dict) -> int:
+async def start_note_quiz(db: Database, tutor: Tutor, user_id: int, note: dict, wanted: int = 6) -> int:
     body = (note.get("body") or "")[:4000]
     title = (note.get("title") or "Конспект")[:80]
     prompt = f"{title}\nКонспект:\n{body}" if body else title
-    quiz_title, drafts = await tutor.make_quiz(topic=prompt, errors=None, fallback=title)
+    quiz_title, drafts = await tutor.make_quiz(topic=prompt, errors=None, fallback=title, wanted=wanted)
     return await _save_quiz(db, user_id, quiz_title, "note", drafts)
 
 
@@ -110,7 +110,7 @@ async def answer_question(
     user_id: int,
     question_id: int,
     option_index: int,
-    tutor: Tutor | None = None,
+    tutor: Tutor | None = None,  # оставлен для совместимости вызовов; Gemini здесь не зовём
 ) -> AnswerView:
     question = await db.get_question(question_id)
     if question is None:
@@ -139,6 +139,7 @@ async def answer_question(
     else:
         await db.requeue_question(question_id)
     kind = "review" if quiz.get("source") == "review" else "quiz"
+    # Без Gemini: проверка ответа должна быть мгновенной.
     change = await record(
         db,
         user_id,
@@ -146,7 +147,7 @@ async def answer_question(
         question.get("skill") or "",
         correct,
         kind,
-        tutor,
+        None,
     )
     done, total = await db.quiz_counts(quiz["id"])
     nxt = await db.next_pending(quiz["id"])

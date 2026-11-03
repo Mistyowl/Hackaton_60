@@ -16,7 +16,15 @@ from app.db import Database
 from app.services.limits import allow, reset
 from app.services.notes import onboard_step, register_check, save_manual, search_notes, student_dossier
 from app.services.reminders import in_quiet_hours, reminder_line
-from app.services.skills import brightness, next_box, record, sky_payload, star_position
+from app.services.skills import (
+    _local_skill_match,
+    brightness,
+    next_box,
+    normalize_name,
+    record,
+    sky_payload,
+    star_position,
+)
 from app.services.quiz import answer_question
 from app.services.tutor import (
     CheckResult,
@@ -35,8 +43,9 @@ from app.textutil import (
     markers_to_html,
     model_html,
     parse_command,
+    utcnow,
 )
-from app.web import create_app
+from app.web import _quiz_summary, create_app
 from app.webapp import MAX_INIT_AGE_SECONDS, sign_init_data, validate_init_data
 
 BOT_TOKEN = "test-bot-token"
@@ -362,6 +371,11 @@ class DatabaseTests(unittest.IsolatedAsyncioTestCase):
         quiz = await self.db.get_quiz(quiz_id)
         assert quiz is not None
         self.assertEqual(quiz["status"], "done")
+        summary = await _quiz_summary(self.db, quiz_id)
+        self.assertEqual(summary["correct"], 2)
+        self.assertEqual(summary["total"], 3)
+        self.assertEqual(summary["review"], ["Сколько будет 0?"])
+        self.assertIn("Сколько будет 0?", summary["advice"])
 
         again = await answer_question(self.db, 1, returned["id"], 1)
         self.assertTrue(again.already_closed)
@@ -394,9 +408,23 @@ class DatabaseTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(answered.status_code, 200)
             done = answered.json()
             self.assertTrue(done["feedback"]["correct"])
+            self.assertEqual(done["feedback"]["correct_index"], 1)
             self.assertTrue(done["finished"])
             self.assertIsNone(done["question"])
-            self.assertNotIn("correct_index", answered.text)
+            self.assertEqual(done["summary"]["correct"], 1)
+            self.assertEqual(done["summary"]["total"], 1)
+            self.assertEqual(done["summary"]["strong"], ["сложение"])
+            self.assertEqual(done["summary"]["review"], [])
+            self.assertIn("Отлично", done["summary"]["advice"])
+            wrong = await client.post("/api/quizzes/topic", json={"topic": "дроби"})
+            self.assertEqual(wrong.status_code, 200)
+            bad = await client.post(
+                "/api/quizzes/answer",
+                json={"question_id": wrong.json()["question"]["id"], "option": 0},
+            )
+            self.assertEqual(bad.status_code, 200)
+            self.assertFalse(bad.json()["feedback"]["correct"])
+            self.assertEqual(bad.json()["feedback"]["correct_index"], 1)
 
     async def test_cabinet_opens_for_the_signed_student(self) -> None:
         await self.db.set_grade(1, 7)
@@ -481,8 +509,13 @@ class DatabaseTests(unittest.IsolatedAsyncioTestCase):
 
             mistakes = await client.get("/api/errors", params={"user_id": 2})
             self.assertEqual(mistakes.status_code, 200)
-            error_rows = mistakes.json()
+            payload = mistakes.json()
+            self.assertIn("counts", payload)
+            self.assertIn("items", payload)
+            error_rows = payload["items"]
             self.assertEqual([item["mistake"] for item in error_rows], ["приём-деления"])
+            self.assertEqual(error_rows[0]["status"], "new")
+            self.assertEqual(payload["counts"]["new"], 1)
             self.assertNotIn("explanation", error_rows[0])
             self.assertNotIn("СКРЫТЫЙ РАЗБОР", mistakes.text)
             self.assertNotIn("секрет Бори", mistakes.text)
@@ -640,15 +673,20 @@ class DatabaseTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(flagged.status_code, 400)
             saved = await client.patch(
                 "/api/profile",
-                json={"first_name": "  Саша  ", "grade": 6},
+                json={"first_name": "  Саша  ", "grade": 6, "exam_goal": "self"},
             )
             self.assertEqual(saved.status_code, 200)
             self.assertEqual(saved.json()["first_name"], "Саша")
             self.assertEqual(saved.json()["grade"], 6)
             self.assertEqual(saved.json()["explain_style"], "detail")
+            self.assertEqual(saved.json()["exam_goal"], "self")
+            self.assertIn("quizzes_done", saved.json())
+            self.assertIn("closed_errors", saved.json())
+            self.assertIn("accuracy", saved.json())
             profile = await client.get("/api/profile")
             self.assertEqual(profile.json()["first_name"], "Саша")
             self.assertEqual(profile.json()["grade"], 6)
+            self.assertEqual(profile.json()["exam_goal"], "self")
         async with AsyncClient(transport=transport, base_url="https://cabinet") as again:
             opened = await again.post("/api/session", json={"init_data": _init_data(1, "Макс")})
             self.assertEqual(opened.status_code, 200)
@@ -727,6 +765,7 @@ class DatabaseTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("menu:ask", menu_payloads)
         self.assertIn("menu:search", menu_payloads)
         self.assertIn("menu:notes", menu_payloads)
+        self.assertNotIn("menu:tour", menu_payloads)
         self.assertNotIn("menu:cabinet", menu_payloads)
         self.assertNotIn("menu:quiz", menu_payloads)
         self.assertNotIn("menu:errors", menu_payloads)
@@ -737,6 +776,7 @@ class DatabaseTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("menu:cabinet", with_cabinet)
         self.assertIn("menu:ask", with_cabinet)
         self.assertIn("menu:own", with_cabinet)
+        self.assertNotIn("menu:tour", with_cabinet)
         self.assertNotIn("menu:search", with_cabinet)
         self.assertNotIn("menu:notes", with_cabinet)
         self.assertNotIn("menu:quiz", with_cabinet)
@@ -784,6 +824,91 @@ class DatabaseTests(unittest.IsolatedAsyncioTestCase):
         await self.db.set_explain_style(1, "short")
         self.assertIsNone(onboard_step(await self.db.get_user(1)))
 
+    async def test_home_stats_count_open_errors_streak_and_week(self) -> None:
+        from zoneinfo import ZoneInfo
+
+        moscow = ZoneInfo("Europe/Moscow")
+        today = datetime.now(moscow).date()
+
+        def stamp(day):
+            moment = datetime(day.year, day.month, day.day, 15, tzinfo=moscow)
+            return moment.astimezone(timezone.utc).isoformat(timespec="seconds")
+
+        await self.db.insert_error(1, "Алгебра", "2x=4", "не разделил", "раздели обе части")
+        await self.db.insert_error(1, "Алгебра", "x=1", "знак", "проверь знак")
+        resolved = await self.db.insert_error(1, "Алгебра", "x=0", "уже закрыта", "готово")
+        await self.db.conn.execute(
+            "UPDATE errors SET resolved_at = ? WHERE id = ?",
+            ("2026-01-01T00:00:00+00:00", resolved),
+        )
+        days = [today, today, today - timedelta(days=1), today - timedelta(days=8)]
+        for day in days:
+            moment = stamp(day)
+            await self.db.conn.execute(
+                """
+                INSERT INTO quizzes (user_id, title, source, status, started_at, finished_at)
+                VALUES (1, 'Квиз', 'topic', 'done', ?, ?)
+                """,
+                (moment, moment),
+            )
+        await self.db.conn.commit()
+
+        stats = await self.db.home_stats(1, today)
+        week_start = today - timedelta(days=today.weekday())
+        self.assertEqual(stats["open_errors"], 2)
+        self.assertEqual(stats["streak_days"], 2)
+        self.assertEqual(stats["week_goal"], 5)
+        self.assertEqual(stats["week_done"], sum(1 for day in days if week_start <= day <= today))
+        self.assertEqual((await self.db.home_stats(2, today))["streak_days"], 0)
+
+    async def test_error_bank_and_profile_stats(self) -> None:
+        skill_id = await self.db.insert_skill(
+            1, "Алгебра", "Квадратные уравнения", 0.4, 2, utcnow(), utcnow()
+        )
+        await self.db.insert_skill_event(skill_id, "quiz", True)
+        await self.db.insert_error(1, "Алгебра", "x²=4", "забыл минус", "два корня", skill_id=skill_id)
+        await self.db.insert_error(1, "Геометрия", "треугольник", "углы", "180", skill_id=None)
+        closed = await self.db.insert_error(1, "Алгебра", "уже", "закрыта", "ок", skill_id=skill_id)
+        await self.db.conn.execute(
+            "UPDATE errors SET resolved_at = ? WHERE id = ?",
+            (utcnow(), closed),
+        )
+        await self.db.conn.commit()
+        note_id = await self.db.insert_note(1, "Из чата", "Алгебра", "тело", "chat")
+        manual_id = await self.db.insert_note(1, "Вручную", "Алгебра", "тело", "manual")
+        app = create_app(self.db, FakeTutor(), BOT_TOKEN)
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="https://cabinet") as client:
+            await client.post("/api/session", json={"init_data": _init_data(1, "Аня")})
+            bank = await client.get("/api/errors")
+            self.assertEqual(bank.status_code, 200)
+            data = bank.json()
+            self.assertEqual(data["counts"]["closed"], 1)
+            self.assertEqual(data["counts"]["active"], 1)
+            self.assertEqual(data["counts"]["new"], 1)
+            by_status = {item["status"]: item for item in data["items"]}
+            self.assertEqual(by_status["active"]["progress"], 1)
+            self.assertEqual(by_status["closed"]["progress"], 3)
+            self.assertEqual(by_status["new"]["progress"], 0)
+            notes = await client.get("/api/notes")
+            sources = {row["id"]: row["source"] for row in notes.json()["notes"]}
+            self.assertEqual(sources[note_id], "chat")
+            self.assertEqual(sources[manual_id], "manual")
+            profile = await client.patch(
+                "/api/profile",
+                json={
+                    "first_name": "Аня",
+                    "grade": 9,
+                    "exam_goal": "oge",
+                    "explain_style": "short",
+                },
+            )
+            self.assertEqual(profile.status_code, 200)
+            self.assertEqual(profile.json()["exam_goal"], "oge")
+            self.assertEqual(profile.json()["closed_errors"], 1)
+            stats = await self.db.profile_stats(1)
+            self.assertEqual(stats["closed_errors"], 1)
+
 
 class SkillTests(unittest.TestCase):
     def test_box_and_brightness(self) -> None:
@@ -797,6 +922,12 @@ class SkillTests(unittest.TestCase):
         self.assertGreater(fresh, 0.9)
         self.assertLess(faded, fresh)
         self.assertEqual(star_position(7), star_position(7))
+        known = [{"id": 3, "name": "деление обеих частей"}]
+        exact = _local_skill_match(normalize_name("деление обеих частей"), known)
+        soft = _local_skill_match(normalize_name("деление обеих"), known)
+        self.assertEqual(exact, (3, "деление обеих частей"))
+        self.assertEqual(soft, (3, "деление обеих частей"))
+        self.assertIsNone(_local_skill_match(normalize_name("дискриминант"), known))
 
     def test_reminder_words(self) -> None:
         self.assertIn("1 звезда", reminder_line(1))

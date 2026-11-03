@@ -29,6 +29,7 @@ from app.bot.render import (
     QUIZ_PROMPT,
     SEARCH_PROMPT,
     STYLE_PROMPT,
+    TOUR_PROMPT,
     WELCOME,
     option_count,
     render_check,
@@ -57,7 +58,13 @@ from app.services.tutor import Tutor, TutorError, TutorReply
 from app.textutil import check_prefix, clip, esc, image_mime, model_html, parse_command
 
 log = logging.getLogger(__name__)
-LUMI_IMAGE = InputMedia(str(Path(__file__).resolve().parent.parent / "assets" / "lumi.jpg"))
+ASSETS = Path(__file__).resolve().parent.parent / "assets"
+LUMI_IMAGE = InputMedia(str(ASSETS / "lumi.jpg"))
+TOUR_IMAGES = [
+    InputMedia(str(ASSETS / "tour-ask.jpg")),
+    InputMedia(str(ASSETS / "tour-check.jpg")),
+    InputMedia(str(ASSETS / "tour-cabinet.jpg")),
+]
 
 
 class BotApp:
@@ -104,6 +111,7 @@ class BotApp:
             return
         await self.db.set_mode(user.user_id, "chat")
         await self.send(event.chat_id, user.user_id, WELCOME, self._menu(), image=LUMI_IMAGE)
+        await self._send_tour(event.chat_id, user.user_id)
 
     async def on_message(self, event: MessageCreated) -> None:
         try:
@@ -353,6 +361,8 @@ class BotApp:
         await self.db.set_explain_style(user_id, style)
         await self.db.set_mode(user_id, "chat")
         await self.show(event, WELCOME, self._menu())
+        chat_id, _ = event.get_ids()
+        await self._send_tour(chat_id, user_id)
 
     async def _handle_command(self, chat_id, user_id: int, command: str, argument: str) -> None:
         step = await self._onboard_step(user_id)
@@ -362,6 +372,7 @@ class BotApp:
                 return
             await self.db.set_mode(user_id, "chat")
             await self.send(chat_id, user_id, WELCOME, self._menu(), image=LUMI_IMAGE)
+            await self._send_tour(chat_id, user_id)
             return
         if step:
             await self._send_onboarding(chat_id, user_id, step, nudge=True)
@@ -762,8 +773,19 @@ class BotApp:
             markup = saved_keyboard(note_id)
         await self.send(chat_id, user_id, text, markup)
 
-    async def send(self, chat_id, user_id: int, text: str, markup, image: InputMedia | None = None) -> None:
-        attachments = []
+    async def _send_tour(self, chat_id, user_id: int) -> None:
+        await self.send(chat_id, user_id, TOUR_PROMPT, None, images=TOUR_IMAGES)
+
+    async def send(
+        self,
+        chat_id,
+        user_id: int,
+        text: str,
+        markup,
+        image: InputMedia | None = None,
+        images: list[InputMedia] | None = None,
+    ) -> None:
+        attachments: list = list(images or [])
         if image is not None:
             attachments.append(image)
         if markup is not None:

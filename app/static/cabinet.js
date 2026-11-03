@@ -6,6 +6,7 @@ const CHEV = '<span class="chev"><svg width="16" height="16" viewBox="0 0 24 24"
 const PIN = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 4h6l-1 7 3 3v2H7v-2l3-3-1-7z"/><path d="M12 16v5"/></svg>';
 const MARK = '<span class="mark"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M5 12l5 5L20 7"/></svg></span>';
 const CHECK_MINI = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M5 12l5 5L20 7"/></svg>';
+const CROSS_MINI = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M6 6l12 12"/><path d="M18 6L6 18"/></svg>';
 const SWIPE_REVEAL = 118;
 
 const gate = document.querySelector("#gate");
@@ -13,19 +14,26 @@ const cabinet = document.querySelector("#cabinet");
 const tabs = document.querySelector("#tabs");
 const nameInput = document.querySelector("#name-input");
 const gradeInput = document.querySelector("#grade-input");
-const gradeToggle = document.querySelector("#grade-toggle");
-const gradeMenu = document.querySelector("#grade-menu");
-const gradeLabel = document.querySelector("#grade-label");
+const goalInput = document.querySelector("#goal-input");
 const saveButton = document.querySelector("#save-profile");
 const saveStatus = document.querySelector("#save-status");
 const remindersInput = document.querySelector("#reminders-input");
+const styleSlider = document.querySelector("#style-slider");
 
 const state = {
-  profile: { first_name: "", grade: null, explain_style: null, reminders: true },
+  profile: {
+    first_name: "", grade: null, explain_style: null, exam_goal: null, reminders: true,
+    quizzes_done: 0, closed_errors: 0, accuracy: 0, streak_days: 0
+  },
+  home: { open_errors: 0, streak_days: 0, week_done: 0, week_goal: 5 },
   notes: [],
   errors: [],
+  errorCounts: { new: 0, active: 0, closed: 0 },
+  notesFilter: "all",
+  errorsFilter: "all",
   sky: null,
   selectedNoteId: null,
+  quizPick: { subject: "algebra", noteId: null, count: 5 },
   noteReturn: "notes",
   quizReturn: "home",
   quizKind: "topic",
@@ -103,14 +111,10 @@ function showCabinet() {
 
 function tabFor(screen) {
   if (screen === "notes" || screen === "note") return "notes";
+  if (screen === "profile") return "profile";
+  if (screen === "quiz-errors" || ((screen === "quiz-play" || screen === "quiz-loading") && state.quizKind === "errors")) return "errors";
   if (screen === "quiz" || screen.startsWith("quiz-")) return "quiz";
-  if (screen === "sky") return "sky";
   return "home";
-}
-
-function closeGradeMenu() {
-  gradeMenu.hidden = true;
-  gradeToggle.setAttribute("aria-expanded", "false");
 }
 
 function closeConfirm() {
@@ -128,7 +132,6 @@ function closeSwipes() {
 }
 
 function showScreen(name) {
-  closeGradeMenu();
   closeSwipes();
   closeConfirm();
   if (name !== "sky") closeStar();
@@ -143,7 +146,9 @@ function showScreen(name) {
     if (on) button.setAttribute("aria-current", "page");
     else button.removeAttribute("aria-current");
   });
-  const roots = ["sky", "home", "notes", "quiz"];
+  document.body.classList.toggle("home-open", name === "home");
+  document.body.classList.toggle("quiz-open", name === "quiz");
+  const roots = ["home", "notes", "quiz", "quiz-errors", "profile"];
   const app = bridge();
   if (app && app.BackButton) {
     if (roots.includes(name)) {
@@ -153,6 +158,8 @@ function showScreen(name) {
     }
   }
   confirmClose(name === "quiz-play" || name === "quiz-loading");
+  if (name === "home" || name === "quiz") refreshHome().catch(() => {});
+  if (name === "quiz") paintQuizSetup();
 }
 
 function goBack() {
@@ -162,25 +169,101 @@ function goBack() {
     return;
   }
   if (screen === "note") showScreen(state.noteReturn || "notes");
-  else if (screen === "quiz-play" || screen === "quiz-loading") showScreen(state.quizKind === "errors" ? "quiz-errors" : state.quizKind === "review" ? "sky" : "quiz-topic");
+  else if (screen === "quiz-play" || screen === "quiz-loading") showScreen(state.quizKind === "errors" ? "quiz-errors" : state.quizKind === "review" ? "sky" : "quiz");
   else if (screen === "quiz-topic" || screen === "quiz-errors") showScreen(state.quizReturn || "home");
   else if (screen === "profile") showScreen("home");
   else showScreen("home");
 }
 
+function ruCount(count, one, few, many) {
+  const abs = Math.abs(count) % 100;
+  const tail = abs % 10;
+  if (abs > 10 && abs < 15) return many;
+  if (tail === 1) return one;
+  if (tail >= 2 && tail <= 4) return few;
+  return many;
+}
+
+function shortDate(value) {
+  const months = ["янв.", "февр.", "мар.", "апр.", "мая", "июн.", "июл.", "авг.", "сент.", "окт.", "нояб.", "дек."];
+  const moment = new Date(value || "");
+  if (Number.isNaN(moment.getTime())) return "";
+  return moment.getDate() + " " + months[moment.getMonth()];
+}
+
+function defaultGoal(grade) {
+  const num = Number(grade);
+  if (num === 9) return "oge";
+  if (num === 10 || num === 11) return "ege";
+  if (num >= 5 && num <= 11) return "self";
+  return "";
+}
+
+function goalLabel(goal, grade) {
+  const value = goal || defaultGoal(grade);
+  if (value === "oge") return "ОГЭ";
+  if (value === "ege") return "ЕГЭ";
+  if (value === "self") return "Для себя";
+  return "";
+}
+
 function paintIdentity() {
   document.querySelector("#home-name").textContent = profileName();
   const chip = document.querySelector("#home-grade-text");
-  if (state.profile.grade == null) {
+  const exam = document.querySelector("#home-exam");
+  const grade = state.profile.grade == null ? null : Number(state.profile.grade);
+  if (grade == null || Number.isNaN(grade)) {
     chip.hidden = true;
+    exam.hidden = true;
     return;
   }
   chip.hidden = false;
-  chip.textContent = state.profile.grade + " класс";
+  chip.textContent = grade + " класс";
+  const label = goalLabel(state.profile.exam_goal, grade);
+  if (label && label !== "Для себя") {
+    exam.hidden = false;
+    exam.textContent = label;
+  } else exam.hidden = true;
+}
+
+function subjectMark(subject) {
+  const text = String(subject || "").toLowerCase();
+  if (text.includes("геометр")) return "Δ";
+  if (text.includes("физик")) return "⚛";
+  if (text.includes("русск")) return "Аа";
+  if (text.includes("хими")) return "Cl";
+  if (text.includes("англий")) return "En";
+  return "Σ";
+}
+
+function fromChat(note) {
+  const source = note && note.source;
+  return source === "chat" || source === "photo";
+}
+
+function paintProgress() {
+  const step = document.querySelector("#next-step");
+  const count = Number(state.home.open_errors || 0);
+  step.hidden = count <= 0;
+  if (count > 0) {
+    const word = ruCount(count, "незакреплённая ошибка", "незакреплённые ошибки", "незакреплённых ошибок");
+    document.querySelector("#next-step-text").textContent = "У тебя " + count + " " + word + ". Пройдём квиз?";
+  }
+  const streak = Number(state.home.streak_days || 0);
+  document.querySelector("#streak-count").textContent = String(streak);
+  document.querySelector("#streak-unit").textContent = ruCount(streak, "день", "дня", "дней");
+  document.querySelector("#streak-dots").innerHTML = Array.from({ length: 7 }, (_, index) => (
+    `<i class="${index < Math.min(streak, 7) ? "on" : ""}"></i>`
+  )).join("");
+  const goal = Number(state.home.week_goal || 5) || 5;
+  const done = Number(state.home.week_done || 0);
+  document.querySelector("#week-done").textContent = String(done);
+  document.querySelector("#week-goal").textContent = String(goal);
+  document.querySelector("#week-fill").style.width = Math.max(0, Math.min(100, (done / goal) * 100)) + "%";
 }
 
 function emptyBlock(text) {
-  return `<div class="empty-card"><img class="mascot" src="/static/lumi-support.svg" alt=""><p>${escapeHtml(text)}</p></div>`;
+  return `<div class="empty-card"><img class="mascot" src="/assets/lumi-mark.png" alt=""><p>${escapeHtml(text)}</p></div>`;
 }
 
 function noteCard(note, mode) {
@@ -189,11 +272,15 @@ function noteCard(note, mode) {
   const preview = mode === "read" && note.preview
     ? `<span class="preview">${escapeHtml(plain(note.preview))}</span>`
     : "";
+  const chat = fromChat(note) ? `<span class="tag-chat">Из чата</span>` : "";
+  const when = shortDate(note.created_at);
+  const meta = when ? (note.subject || "Без предмета") + " · " + when : (note.subject || "Без предмета");
   return `<button type="button" class="card${selected ? " selected" : ""}" ${select ? "data-select" : "data-note"}="${escapeHtml(note.id)}"${select ? ` aria-pressed="${selected ? "true" : "false"}"` : ""}>
-    <span class="icon">${BOOK}</span>
+    <span class="note-mark" aria-hidden="true">${escapeHtml(subjectMark(note.subject))}</span>
     <span class="copy">
       <h3>${note.pinned ? `<span class="pin" title="Закреплено">${PIN}</span>` : ""}${escapeHtml(note.title || "Конспект")}</h3>
-      <span class="meta">${escapeHtml(metaLine(note.subject))}</span>
+      <span class="meta">${escapeHtml(select ? metaLine(note.subject) : meta)}</span>
+      ${chat}
       ${preview}
     </span>
     ${selected ? MARK : CHEV}
@@ -210,34 +297,90 @@ function swipeCard(note, mode) {
   </div>`;
 }
 
-function showSwipeHint() {
-  const hint = document.querySelector("#swipe-hint");
-  hint.hidden = localStorage.getItem("lumi-swipe-hint") === "1" || !state.notes.length;
+function homeNoteCard(note) {
+  const subject = note.subject || "Без предмета";
+  const when = shortDate(note.created_at);
+  const meta = when ? subject + " · " + when : subject;
+  return `<button type="button" class="home-note" data-note="${escapeHtml(note.id)}">
+    <span class="home-note-icon" aria-hidden="true">${escapeHtml(subjectMark(note.subject))}</span>
+    <span class="copy">
+      <h3>${escapeHtml(note.title || "Конспект")}</h3>
+      <span class="meta">${escapeHtml(meta)}</span>
+    </span>
+  </button>`;
 }
 
 function paintHome() {
   paintIdentity();
+  paintProgress();
   const box = document.querySelector("#home-notes");
   const all = document.querySelector("#show-all");
   if (!state.notes.length) {
     all.hidden = true;
-    box.innerHTML = emptyBlock("Сфоткай задачу в чате, и здесь появится первый конспект.");
-    showSwipeHint();
+    box.innerHTML = `<p class="home-empty">Сфоткай задачу в чате, и здесь появится первый конспект.</p>`;
     return;
   }
   all.hidden = false;
-  box.innerHTML = state.notes.slice(0, 3).map((note) => swipeCard(note, "home")).join("");
-  showSwipeHint();
-  localStorage.setItem("lumi-swipe-hint", "1");
+  box.innerHTML = state.notes.slice(0, 3).map((note) => homeNoteCard(note)).join("");
+}
+
+let homeTicket = 0;
+async function refreshHome() {
+  const ticket = ++homeTicket;
+  const response = await fetch("/api/home");
+  if (ticket !== homeTicket) return;
+  if (response.status === 401) return showGate(LOCKED);
+  if (!response.ok) return;
+  state.home = await response.json();
+  if (state.screen === "home") paintHome();
+  paintQuizSetup();
+}
+
+function filteredNotes() {
+  const filter = state.notesFilter || "all";
+  if (filter === "all") return state.notes.slice();
+  if (filter === "chat") return state.notes.filter((note) => fromChat(note));
+  const subject = subjectById(filter);
+  return notesForSubject(subject);
+}
+
+function paintNotesFilters() {
+  const box = document.querySelector("#notes-filters");
+  if (!box) return;
+  const chips = [
+    { id: "all", label: "Все" },
+    { id: "chat", label: "Из чата" },
+    ...SUBJECTS.map((item) => ({ id: item.id, label: item.label }))
+  ];
+  box.innerHTML = chips.map((chip) => `
+    <button type="button" class="filter-chip${state.notesFilter === chip.id ? " on" : ""}" data-notes-filter="${escapeHtml(chip.id)}">${escapeHtml(chip.label)}</button>
+  `).join("");
 }
 
 function paintNotes() {
+  paintNotesFilters();
   const box = document.querySelector("#notes-list");
+  const rows = filteredNotes();
   if (!state.notes.length) {
     box.innerHTML = emptyBlock(EMPTY_NOTES);
     return;
   }
-  box.innerHTML = state.notes.map((note) => swipeCard(note, "read")).join("");
+  if (!rows.length) {
+    box.innerHTML = emptyBlock("В этом фильтре пока пусто.");
+    return;
+  }
+  const groups = new Map();
+  rows.forEach((note) => {
+    const key = note.subject || "Без предмета";
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(note);
+  });
+  box.innerHTML = Array.from(groups.entries()).map(([title, items]) => `
+    <section class="note-group">
+      <h2 class="note-group-title">${escapeHtml(title)} · ${items.length}</h2>
+      ${items.map((note) => swipeCard(note, "read")).join("")}
+    </section>
+  `).join("");
 }
 
 function paintTopics() {
@@ -254,12 +397,75 @@ function paintTopics() {
   button.disabled = state.selectedNoteId == null;
 }
 
+const SUBJECTS = [
+  { id: "algebra", label: "Алгебра", match: "алгебр" },
+  { id: "geometry", label: "Геометрия", match: "геометр" },
+  { id: "physics", label: "Физика", match: "физик" },
+  { id: "russian", label: "Русский", match: "русск" },
+  { id: "chemistry", label: "Химия", match: "хими" },
+  { id: "english", label: "Английский", match: "англий" }
+];
+
+function subjectById(id) {
+  return SUBJECTS.find((item) => item.id === id) || SUBJECTS[0];
+}
+
+function notesForSubject(subject) {
+  const needle = subject.match;
+  return state.notes.filter((note) => (note.subject || "").toLowerCase().includes(needle));
+}
+
+function paintQuizSetup() {
+  const line = document.querySelector("#quiz-error-line");
+  if (!line) return;
+  const count = Number(state.home.open_errors || 0);
+  if (count > 0) {
+    const word = ruCount(count, "незакреплённая", "незакреплённые", "незакреплённых");
+    line.textContent = count + " " + word + " · новые формулировки";
+  } else line.textContent = "Пока нет незакреплённых ошибок";
+  const subject = subjectById(state.quizPick.subject);
+  document.querySelectorAll("#subject-grid [data-subject]").forEach((button) => {
+    const on = button.dataset.subject === subject.id;
+    button.classList.toggle("on", on);
+    if (on) button.setAttribute("aria-pressed", "true");
+    else button.setAttribute("aria-pressed", "false");
+  });
+  const topics = notesForSubject(subject);
+  if (state.quizPick.noteId != null && !topics.some((note) => String(note.id) === String(state.quizPick.noteId))) {
+    state.quizPick.noteId = null;
+  }
+  const chips = [`<button type="button" class="pick${state.quizPick.noteId == null ? " on" : ""}" data-topic="">Все темы</button>`];
+  topics.slice(0, 8).forEach((note) => {
+    const on = String(note.id) === String(state.quizPick.noteId);
+    chips.push(`<button type="button" class="pick${on ? " on" : ""}" data-topic="${escapeHtml(note.id)}">${escapeHtml(note.title || "Конспект")}</button>`);
+  });
+  document.querySelector("#topic-chips").innerHTML = chips.join("");
+  document.querySelectorAll("#count-chips [data-count]").forEach((button) => {
+    const on = Number(button.dataset.count) === Number(state.quizPick.count);
+    button.classList.toggle("on", on);
+    if (on) button.setAttribute("aria-pressed", "true");
+    else button.setAttribute("aria-pressed", "false");
+  });
+}
+
 function setGrade(value, notify) {
   const grade = value == null || value === "" ? "" : String(value);
   gradeInput.value = grade;
-  gradeLabel.textContent = grade ? grade + " класс" : "Выбери класс";
-  gradeMenu.querySelectorAll("[data-grade]").forEach((button) => {
-    button.setAttribute("aria-selected", button.dataset.grade === grade ? "true" : "false");
+  document.querySelectorAll("#grade-row [data-grade]").forEach((button) => {
+    button.classList.toggle("on", button.dataset.grade === grade);
+  });
+  if (notify) {
+    if (saveButton.textContent !== "Сохранить") saveButton.textContent = "Сохранить";
+    if (!goalInput.value) setGoal(defaultGoal(grade), false);
+    previewFromForm();
+  }
+}
+
+function setGoal(value, notify) {
+  const goal = value == null || value === "" ? "" : String(value);
+  goalInput.value = goal;
+  document.querySelectorAll("#goal-row [data-goal]").forEach((button) => {
+    button.classList.toggle("on", button.dataset.goal === goal);
   });
   if (notify) {
     if (saveButton.textContent !== "Сохранить") saveButton.textContent = "Сохранить";
@@ -270,24 +476,58 @@ function setGrade(value, notify) {
 function previewFromForm() {
   const name = nameInput.value.trim() || "Ученик";
   const grade = gradeInput.value;
+  const goal = goalLabel(goalInput.value, Number(grade));
   document.querySelector("#preview-name").textContent = name;
-  document.querySelector("#preview-meta").textContent = grade ? "Ученик · " + grade + " класс" : "Ученик";
+  if (grade && goal) document.querySelector("#preview-meta").textContent = grade + " класс · " + goal;
+  else if (grade) document.querySelector("#preview-meta").textContent = grade + " класс";
+  else document.querySelector("#preview-meta").textContent = "Ученик";
 }
 
 function paintStyle(style) {
-  document.querySelectorAll("[data-style]").forEach((button) => {
-    button.classList.toggle("active", button.dataset.style === style);
-  });
+  const value = style === "detail" ? "1" : "0";
+  if (styleSlider) styleSlider.value = value;
+  const text = document.querySelector("#style-preview-text");
+  if (text) {
+    text.textContent = style === "detail"
+      ? "Разберу шаг за шагом и покажу, на что смотреть."
+      : "Объясню понятно, без лишнего.";
+  }
+}
+
+function paintProfileStats() {
+  document.querySelector("#stat-quizzes").textContent = String(state.profile.quizzes_done || 0);
+  document.querySelector("#stat-closed").textContent = String(state.profile.closed_errors || 0);
+  document.querySelector("#stat-accuracy").textContent = String(state.profile.accuracy || 0) + "%";
+  const box = document.querySelector("#achievements");
+  if (!box) return;
+  const quizzes = Number(state.profile.quizzes_done || 0);
+  const closed = Number(state.profile.closed_errors || 0);
+  const streak = Number(state.profile.streak_days || 0);
+  const items = [
+    { on: quizzes >= 1, icon: "⭐", title: "Первый квиз", hint: "Пройди любой квиз" },
+    { on: streak >= 7, icon: "🔥", title: "Неделя без пропусков", hint: "7 дней подряд" },
+    { on: quizzes >= 5, icon: "⚡", title: "5 квизов", hint: "Закрой 5 квизов" },
+    { on: closed >= 1, icon: "🎯", title: "Ошибка закрыта", hint: "Закрепи первую ошибку" }
+  ];
+  box.innerHTML = items.map((item) => `
+    <article class="achievement${item.on ? "" : " off"}">
+      <div class="achievement-icon" aria-hidden="true">${item.icon}</div>
+      <strong>${escapeHtml(item.title)}</strong>
+      <span>${escapeHtml(item.hint)}</span>
+    </article>
+  `).join("");
 }
 
 function fillProfileForm() {
   nameInput.value = state.profile.first_name || "";
   setGrade(state.profile.grade, false);
-  paintStyle(state.profile.explain_style || "");
+  setGoal(state.profile.exam_goal || defaultGoal(state.profile.grade), false);
+  paintStyle(state.profile.explain_style || "short");
   remindersInput.checked = state.profile.reminders !== false;
   saveButton.textContent = "Сохранить";
   saveStatus.textContent = "";
   saveStatus.className = "status";
+  paintProfileStats();
   previewFromForm();
 }
 
@@ -362,42 +602,88 @@ function openProfile() {
   showScreen("profile");
 }
 
+function errorStatusLabel(status) {
+  if (status === "closed") return "Закреплена";
+  if (status === "active") return "В работе";
+  return "Новая";
+}
+
+function paintErrorFilters() {
+  const box = document.querySelector("#error-filters");
+  if (!box) return;
+  const subjects = Array.from(new Set(state.errors.map((row) => row.subject).filter(Boolean)));
+  const chips = [{ id: "all", label: "Все" }, ...subjects.map((name) => ({ id: name, label: name }))];
+  box.innerHTML = chips.map((chip) => `
+    <button type="button" class="filter-chip${state.errorsFilter === chip.id ? " on" : ""}" data-errors-filter="${escapeHtml(chip.id)}">${escapeHtml(chip.label)}</button>
+  `).join("");
+}
+
+function paintErrorBank() {
+  const box = document.querySelector("#error-list");
+  const button = document.querySelector("#start-errors");
+  const counts = state.errorCounts || { new: 0, active: 0, closed: 0 };
+  document.querySelector("#bank-new").textContent = String(counts.new || 0);
+  document.querySelector("#bank-active").textContent = String(counts.active || 0);
+  document.querySelector("#bank-closed").textContent = String(counts.closed || 0);
+  paintErrorFilters();
+  const open = state.errors.filter((row) => row.status !== "closed");
+  button.disabled = !open.length;
+  let rows = state.errors;
+  if (state.errorsFilter && state.errorsFilter !== "all") {
+    rows = rows.filter((row) => row.subject === state.errorsFilter);
+  }
+  if (!state.errors.length) {
+    box.innerHTML = emptyBlock(EMPTY_ERRORS);
+    return;
+  }
+  if (!rows.length) {
+    box.innerHTML = emptyBlock("В этом фильтре пока пусто.");
+    return;
+  }
+  box.innerHTML = rows.map((row) => {
+    const progress = Math.max(0, Math.min(3, Number(row.progress || 0)));
+    const topic = row.skill || row.mistake || "";
+    const meta = [row.subject || "Предмет", topic].filter(Boolean).join(" · ");
+    const bars = [0, 1, 2].map((index) => `<i class="${index < progress ? "on" : ""}"></i>`).join("");
+    return `<article class="error-card">
+      <div class="error-card-top">
+        <span class="error-card-meta">${escapeHtml(meta)}</span>
+        <span class="error-status ${escapeHtml(row.status || "new")}">${escapeHtml(errorStatusLabel(row.status))}</span>
+      </div>
+      <p class="error-card-q">${escapeHtml(row.problem || row.mistake || "Ошибка")}</p>
+      <div class="error-progress">
+        <div class="error-bars" aria-hidden="true">${bars}</div>
+        <span>${progress} из 3 верных</span>
+      </div>
+    </article>`;
+  }).join("");
+}
+
 async function openErrors(from) {
   const ticket = ++errorsTicket;
-  state.quizReturn = from === "quiz" ? "quiz" : "home";
+  state.quizReturn = from === "quiz" ? "quiz" : from === "errors" ? "quiz-errors" : "home";
   showScreen("quiz-errors");
-  const box = document.querySelector("#error-list");
   const status = document.querySelector("#error-status");
   const button = document.querySelector("#start-errors");
-  const heading = document.querySelector("#error-heading");
   button.disabled = true;
-  heading.hidden = true;
   status.className = "status";
   status.textContent = "";
   const response = await fetch("/api/errors");
   if (ticket !== errorsTicket) return;
   if (response.status === 401) return showGate(LOCKED);
   if (!response.ok) {
-    box.innerHTML = "";
+    document.querySelector("#error-list").innerHTML = "";
     status.className = "status error";
-    status.textContent = "Не удалось собрать темы.";
+    status.textContent = "Не удалось открыть банк ошибок.";
     return;
   }
-  const rows = await response.json();
-  state.errors = Array.isArray(rows) ? rows : [];
-  if (!state.errors.length) {
-    box.innerHTML = emptyBlock(EMPTY_ERRORS);
-    button.disabled = true;
-    return;
+  const data = await response.json();
+  state.errors = Array.isArray(data.items) ? data.items : [];
+  state.errorCounts = data.counts || { new: 0, active: 0, closed: 0 };
+  if (state.errorsFilter !== "all" && !state.errors.some((row) => row.subject === state.errorsFilter)) {
+    state.errorsFilter = "all";
   }
-  heading.hidden = false;
-  box.innerHTML = state.errors.map((row) => `
-    <article class="card plain">
-      <span class="icon">${BOOK}</span>
-      <span class="copy"><h3>${escapeHtml(row.subject || "Без предмета")}</h3><span class="meta">${escapeHtml(row.mistake || "")}</span></span>
-    </article>
-  `).join("");
-  button.disabled = false;
+  paintErrorBank();
 }
 
 function splitPrompt(prompt) {
@@ -413,28 +699,41 @@ function promptHtml(prompt) {
   return `${caption}<div class="eq${long ? " long" : ""}">${escapeHtml(parts.main)}</div>`;
 }
 
+function topicList(items) {
+  if (!items || !items.length) return "—";
+  return items.map((item) => escapeHtml(item)).join(", ");
+}
+
+function paintQuizResults() {
+  const summary = quiz.summary || {};
+  const correct = Number(summary.correct || 0);
+  const total = Number(summary.total || quiz.total || 0);
+  const review = summary.review || [];
+  const perfect = !review.length && correct >= total && total > 0;
+  document.querySelector("#result-score").textContent = correct + "/" + total;
+  document.querySelector("#result-title").textContent = perfect
+    ? "Супер! Все ответы с первой попытки."
+    : "Не страшно — ошибки уже в банке, разберём их вместе.";
+  document.querySelector("#result-strong").innerHTML = topicList(summary.strong);
+  document.querySelector("#result-review").innerHTML = topicList(review);
+  document.querySelector("#result-advice").textContent = summary.advice
+    || (perfect
+      ? "Отлично! Можно взять новую тему."
+      : "Рекомендую пройти квиз по ошибкам через день.");
+  document.querySelector("#quiz-retry").hidden = !review.length;
+}
+
 function paintQuiz() {
   const live = document.querySelector("#quiz-live");
   const results = document.querySelector("#quiz-results");
   const button = document.querySelector("#quiz-go");
   document.querySelector("#quiz-kicker").textContent = quiz && quiz.kind === "errors" ? "Тренировка" : quiz && quiz.kind === "review" ? "Повторение" : "Квиз по конспектам";
   document.querySelector("#quiz-title").textContent = quiz && quiz.title ? quiz.title : "Квиз";
-  if (quiz && quiz.finished && quiz.feedback) {
+  if (quiz && quiz.showResults) {
     live.hidden = true;
     results.hidden = false;
     button.hidden = true;
-    const perfect = !quiz.misses.length;
-    document.querySelector("#result-mascot").src = perfect ? "/static/lumi-happy.svg" : "/static/lumi-support.svg";
-    document.querySelector("#result-title").textContent = perfect ? "Небо стало ярче" : "Квиз пройден";
-    const elapsed = quiz.elapsed ? " · " + quiz.elapsed : "";
-    document.querySelector("#result-score").textContent = "Закрыто " + (quiz.done || 0) + " из " + (quiz.total || 0) + elapsed;
-    const star = document.querySelector("#result-star");
-    star.hidden = !quiz.star;
-    star.textContent = quiz.star || "";
-    document.querySelector("#result-misses").innerHTML = (quiz.misses || []).map((miss) => `
-      <article class="miss"><strong>${escapeHtml(miss.prompt || "")}</strong><span>${escapeHtml(miss.explanation || "")}</span></article>
-    `).join("");
-    document.querySelector("#quiz-retry").hidden = quiz.kind === "review" && !quiz.misses.length;
+    paintQuizResults();
     return;
   }
   live.hidden = false;
@@ -462,29 +761,48 @@ function paintQuiz() {
   const number = quiz.number || 1;
   progress.hidden = false;
   bar.hidden = false;
-  progress.textContent = "Вопрос " + number + " из " + total;
-  fill.style.width = Math.min(100, Math.round(((number - 1) / total) * 100)) + "%";
+  progress.textContent = number + "/" + total;
+  fill.style.width = Math.min(100, Math.round((number / total) * 100)) + "%";
   heading.hidden = false;
   card.innerHTML = promptHtml(quiz.shown.prompt);
+  const correctIndex = quiz.feedback && Number.isInteger(quiz.feedback.correct_index)
+    ? quiz.feedback.correct_index
+    : null;
   options.innerHTML = (quiz.shown.options || []).map((option, index) => {
     const picked = quiz.picked === index;
-    return `<button type="button" class="option${picked ? " picked" : ""}" data-option="${index}" aria-pressed="${picked ? "true" : "false"}"${quiz.feedback || quiz.busy ? " disabled" : ""}>
-      <span class="dot">${picked ? CHECK_MINI : ""}</span><span>${escapeHtml(option)}</span>
+    let klass = "option";
+    let mark = "";
+    if (quiz.feedback && correctIndex != null) {
+      if (index === correctIndex) {
+        klass += " ok";
+        mark = CHECK_MINI;
+      } else if (picked) {
+        klass += " bad";
+        mark = CROSS_MINI;
+      }
+    } else if (picked) {
+      klass += " picked";
+      mark = CHECK_MINI;
+    }
+    return `<button type="button" class="${klass}" data-option="${index}" aria-pressed="${picked ? "true" : "false"}"${quiz.feedback || quiz.busy ? " disabled" : ""}>
+      <span class="dot">${mark}</span><span>${escapeHtml(option)}</span>
     </button>`;
   }).join("");
   if (quiz.feedback) {
-    const prefix = quiz.feedback.correct ? "Верно. " : "Пока неверно. ";
     feedback.hidden = false;
-    feedback.className = "feedback " + (quiz.feedback.correct ? "ok" : "bad");
-    feedback.textContent = prefix + (quiz.feedback.explanation || "") + (quiz.star ? " " + quiz.star : "");
-    const hasNext = quiz.pending && quiz.pending.question && !quiz.finished;
-    button.textContent = hasNext ? "Дальше" : "В кабинет";
+    feedback.className = "coach " + (quiz.feedback.correct ? "ok" : "bad");
+    document.querySelector("#coach-title").textContent = quiz.feedback.correct
+      ? "Верно! 🎉"
+      : "Почти! Давай разберём";
+    document.querySelector("#coach-text").textContent = quiz.feedback.explanation || "";
+    button.textContent = quiz.finished ? "Результаты →" : "Дальше →";
     button.disabled = Boolean(quiz.busy);
     fill.style.width = "100%";
     return;
   }
   feedback.hidden = true;
-  feedback.textContent = "";
+  document.querySelector("#coach-title").textContent = "";
+  document.querySelector("#coach-text").textContent = "";
   button.textContent = "Проверить ответ";
   button.disabled = quiz.picked == null || Boolean(quiz.busy);
 }
@@ -502,6 +820,8 @@ function beginQuiz(kind, data, fallback, token) {
     shown: question,
     picked: null,
     feedback: null,
+    summary: null,
+    showResults: false,
     pending: question ? null : data,
     finished: Boolean(data.finished || !question),
     busy: false,
@@ -514,6 +834,46 @@ function beginQuiz(kind, data, fallback, token) {
   document.querySelector("#quiz-status").className = "status";
   paintQuiz();
   showScreen("quiz-play");
+}
+
+async function startSetupQuiz() {
+  const token = ++quizToken;
+  const button = document.querySelector("#start-setup");
+  const status = document.querySelector("#setup-status");
+  const subject = subjectById(state.quizPick.subject);
+  const count = state.quizPick.count === 10 ? 10 : 5;
+  const note = state.notes.find((item) => String(item.id) === String(state.quizPick.noteId));
+  const setup = { subject: subject.id, noteId: note ? note.id : null, count };
+  let url = "/api/quizzes/topic";
+  let body = JSON.stringify({ topic: subject.label, count });
+  let fallback = subject.label;
+  if (note) {
+    state.selectedNoteId = note.id;
+    fallback = note.title || fallback;
+    url = "/api/quizzes/note/" + encodeURIComponent(note.id);
+    body = JSON.stringify({ count });
+  }
+  button.disabled = true;
+  status.className = "status";
+  status.textContent = "";
+  showScreen("quiz-loading");
+  try {
+    const response = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body });
+    const data = await response.json().catch(() => ({}));
+    if (token !== quizToken) return;
+    if (response.status === 401) return showGate(LOCKED);
+    if (!response.ok) {
+      showScreen("quiz");
+      status.className = "status error";
+      status.textContent = detailText(data, "Квиз не собрался.");
+      return;
+    }
+    beginQuiz("topic", data, fallback, token);
+    quiz.setup = setup;
+    quiz.noteId = note ? note.id : null;
+  } finally {
+    if (token === quizToken) button.disabled = false;
+  }
 }
 
 async function startQuiz(kind, extra) {
@@ -549,7 +909,7 @@ async function startQuiz(kind, extra) {
     if (token !== quizToken) return;
     if (response.status === 401) return showGate(LOCKED);
     if (!response.ok) {
-      showScreen(kind === "review" ? "sky" : kind === "errors" ? "quiz-errors" : "quiz-topic");
+      showScreen(kind === "review" ? "sky" : kind === "errors" ? "quiz-errors" : "quiz");
       if (status) {
         status.className = "status error";
         status.textContent = detailText(data, "Квиз не собрался.");
@@ -571,6 +931,7 @@ function advanceQuiz() {
   const next = quiz.pending;
   if (!next || !next.question || quiz.finished) {
     if (quiz.finished) {
+      quiz.showResults = true;
       paintQuiz();
       return;
     }
@@ -585,6 +946,7 @@ function advanceQuiz() {
   quiz.pending = null;
   quiz.picked = null;
   quiz.finished = false;
+  quiz.showResults = false;
   paintQuiz();
 }
 
@@ -618,6 +980,8 @@ async function submitAnswer() {
     quiz.elapsed = data.elapsed || quiz.elapsed;
     quiz.star = data.star || quiz.star;
     quiz.misses = data.misses || [];
+    quiz.summary = data.summary || quiz.summary || null;
+    quiz.showResults = false;
     if (data.skill_id) quiz.skillIds = [data.skill_id].concat(quiz.skillIds || []);
     if (data.title) quiz.title = data.title;
     haptic(data.feedback && data.feedback.correct ? "ok" : "bad");
@@ -639,6 +1003,7 @@ function starWord(count) {
 
 function paintSkyEntry() {
   const line = document.querySelector("#home-sky-line");
+  if (!line) return;
   const sky = state.sky;
   if (!sky || !sky.summary || !sky.summary.total) {
     line.textContent = "Появится после первой проверенной задачи";
@@ -722,6 +1087,9 @@ async function loadCabinet() {
   if (!notesResponse.ok) return showGate("Кабинет не смог открыть базу.");
   const notesPayload = await notesResponse.json();
   state.notes = notesPayload.notes || [];
+  const homeResponse = await fetch("/api/home");
+  if (homeResponse.status === 401) return showGate(LOCKED);
+  if (homeResponse.ok) state.home = await homeResponse.json();
   state.selectedNoteId = null;
   paintHome();
   paintNotes();
@@ -898,8 +1266,9 @@ document.querySelectorAll("[data-back]").forEach((button) => {
       }
       showScreen(state.noteReturn || "notes");
     }
-    else if (target === "quiz-origin") showScreen(state.quizKind === "errors" ? "quiz-errors" : state.quizKind === "review" ? "sky" : "quiz-topic");
+    else if (target === "quiz-origin") showScreen(state.quizKind === "errors" ? "quiz-errors" : state.quizKind === "review" ? "sky" : "quiz");
     else if (target === "quiz-return") showScreen(state.quizReturn || "home");
+    else if (target === "notes") openNotes();
     else showScreen(target);
   });
 });
@@ -909,27 +1278,121 @@ tabs.querySelectorAll("[data-tab]").forEach((button) => {
     const name = button.dataset.tab;
     if (name === "notes") openNotes();
     else if (name === "quiz") showScreen("quiz");
-    else if (name === "sky") {
-      showScreen("sky");
-      loadSky().catch(() => showGate("Кабинет не смог открыть базу."));
-    } else showScreen("home");
+    else if (name === "errors") openErrors("errors").catch(() => showGate("Кабинет не смог открыть базу."));
+    else if (name === "profile") openProfile();
+    else showScreen("home");
   });
 });
 
-document.querySelector("#open-profile").addEventListener("click", openProfile);
-document.querySelector("#open-sky").addEventListener("click", () => {
-  loadSky().then(() => showScreen("sky")).catch(() => showGate("Кабинет не смог открыть базу."));
+document.querySelector("#subject-grid").addEventListener("click", (event) => {
+  const button = event.target.closest("[data-subject]");
+  if (!button) return;
+  state.quizPick.subject = button.dataset.subject;
+  state.quizPick.noteId = null;
+  paintQuizSetup();
 });
-document.querySelector("#open-topic").addEventListener("click", () => openTopicQuiz("home"));
-document.querySelector("#open-errors").addEventListener("click", () => openErrors("home").catch(() => showGate("Кабинет не смог открыть базу.")));
-document.querySelector("#menu-topic").addEventListener("click", () => openTopicQuiz("quiz"));
-document.querySelector("#menu-errors").addEventListener("click", () => openErrors("quiz").catch(() => showGate("Кабинет не смог открыть базу.")));
-document.querySelector("#ask-chat").addEventListener("click", () => {
-  const app = bridge();
-  if (app && app.close) app.close();
+document.querySelector("#topic-chips").addEventListener("click", (event) => {
+  const button = event.target.closest("[data-topic]");
+  if (!button) return;
+  state.quizPick.noteId = button.dataset.topic || null;
+  paintQuizSetup();
+});
+document.querySelector("#count-chips").addEventListener("click", (event) => {
+  const button = event.target.closest("[data-count]");
+  if (!button) return;
+  state.quizPick.count = Number(button.dataset.count) === 10 ? 10 : 5;
+  paintQuizSetup();
+});
+document.querySelector("#quiz-error-card").addEventListener("click", () => {
+  const status = document.querySelector("#setup-status");
+  if (!Number(state.home.open_errors || 0)) {
+    status.className = "status error";
+    status.textContent = "Сначала пришли решение с ошибкой — тогда соберу квиз.";
+    return;
+  }
+  status.textContent = "";
+  status.className = "status";
+  startQuiz("errors").catch(() => showGate("Кабинет не смог открыть базу."));
+});
+document.querySelector("#start-setup").addEventListener("click", () => startSetupQuiz().catch(() => showGate("Кабинет не смог открыть базу.")));
+document.querySelector("#close-errors").addEventListener("click", () => openErrors("home").catch(() => showGate("Кабинет не смог открыть базу.")));
+document.querySelectorAll("[data-quick]").forEach((button) => {
+  button.addEventListener("click", () => {
+    const action = button.dataset.quick;
+    if (action === "quiz-topic") showScreen("quiz");
+    else if (action === "quiz-errors") openErrors("home").catch(() => showGate("Кабинет не смог открыть базу."));
+    else if (action === "note-new") {
+      document.querySelector("#new-note-input").value = "";
+      document.querySelector("#new-note-status").textContent = "";
+      showScreen("note-new");
+    } else if (action === "ask") {
+      const app = bridge();
+      if (app && app.close) app.close();
+    }
+  });
+});
+document.querySelector("#notes-new").addEventListener("click", () => {
+  document.querySelector("#new-note-input").value = "";
+  document.querySelector("#new-note-status").textContent = "";
+  showScreen("note-new");
+});
+document.querySelector("#notes-filters").addEventListener("click", (event) => {
+  const chip = event.target.closest("[data-notes-filter]");
+  if (!chip) return;
+  state.notesFilter = chip.dataset.notesFilter || "all";
+  paintNotes();
+});
+document.querySelector("#error-filters").addEventListener("click", (event) => {
+  const chip = event.target.closest("[data-errors-filter]");
+  if (!chip) return;
+  state.errorsFilter = chip.dataset.errorsFilter || "all";
+  paintErrorBank();
+});
+document.querySelector("#new-note-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const input = document.querySelector("#new-note-input");
+  const status = document.querySelector("#new-note-status");
+  const button = document.querySelector("#save-new-note");
+  const text = input.value.trim();
+  if (!text) {
+    status.className = "status error";
+    status.textContent = "Напиши текст конспекта.";
+    return;
+  }
+  button.disabled = true;
+  status.textContent = "";
+  status.className = "status";
+  try {
+    const response = await fetch("/api/notes", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text })
+    });
+    const data = await response.json().catch(() => ({}));
+    if (response.status === 401) return showGate(LOCKED);
+    if (!response.ok) {
+      status.className = "status error";
+      status.textContent = detailText(data, "Не удалось сохранить.");
+      return;
+    }
+    state.notes.push({
+      id: data.id,
+      title: data.title,
+      subject: data.subject,
+      preview: data.body || "",
+      pinned: false,
+      source: data.source || "manual",
+      created_at: data.created_at
+    });
+    sortNotes();
+    paintNotes();
+    paintTopics();
+    showScreen("notes");
+  } finally {
+    button.disabled = false;
+  }
 });
 
-bindSwipe(document.querySelector("#home-notes"));
 bindSwipe(document.querySelector("#notes-list"));
 document.querySelector("#show-all").addEventListener("click", openNotes);
 document.querySelector("#home-notes").addEventListener("click", (event) => openNoteFromList(event, "home"));
@@ -990,15 +1453,15 @@ document.querySelector("#quiz-go").addEventListener("click", () => {
 });
 document.querySelector("#quiz-again").addEventListener("click", () => {
   if (!quiz) return;
-  if (quiz.kind === "topic") startQuiz("topic").catch(() => showGate("Кабинет не смог открыть базу."));
+  if (quiz.setup) startSetupQuiz().catch(() => showGate("Кабинет не смог открыть базу."));
+  else if (quiz.kind === "topic") startQuiz("topic").catch(() => showGate("Кабинет не смог открыть базу."));
   else if (quiz.kind === "errors") startQuiz("errors").catch(() => showGate("Кабинет не смог открыть базу."));
   else startQuiz("review").catch(() => showGate("Кабинет не смог открыть базу."));
 });
 document.querySelector("#quiz-retry").addEventListener("click", () => startQuiz("errors").catch(() => showGate("Кабинет не смог открыть базу.")));
-document.querySelector("#quiz-sky").addEventListener("click", () => {
-  const ids = quiz && quiz.skillIds ? quiz.skillIds : [];
-  if (ids.length) sessionStorage.setItem("lumi-ignite", JSON.stringify(ids));
-  loadSky().then(() => showScreen("sky")).catch(() => showGate("Кабинет не смог открыть базу."));
+document.querySelector("#quiz-chat").addEventListener("click", () => {
+  const app = webApp();
+  if (app && app.close) app.close();
 });
 document.querySelector("#sky-canvas").addEventListener("click", (event) => {
   const star = event.target.closest("[data-star]");
@@ -1032,30 +1495,24 @@ nameInput.addEventListener("input", () => {
   if (saveButton.textContent !== "Сохранить") saveButton.textContent = "Сохранить";
   previewFromForm();
 });
-gradeToggle.addEventListener("click", () => {
-  const open = gradeMenu.hidden;
-  gradeMenu.hidden = !open;
-  gradeToggle.setAttribute("aria-expanded", open ? "true" : "false");
-});
-gradeMenu.addEventListener("click", (event) => {
+document.querySelector("#grade-row").addEventListener("click", (event) => {
   const button = event.target.closest("[data-grade]");
   if (!button) return;
   setGrade(button.dataset.grade, true);
-  closeGradeMenu();
 });
-document.querySelectorAll("[data-style]").forEach((button) => {
-  button.addEventListener("click", () => {
-    paintStyle(button.dataset.style);
-    state.profile.explain_style = button.dataset.style;
-    if (saveButton.textContent !== "Сохранить") saveButton.textContent = "Сохранить";
-  });
+document.querySelector("#goal-row").addEventListener("click", (event) => {
+  const button = event.target.closest("[data-goal]");
+  if (!button) return;
+  setGoal(button.dataset.goal, true);
 });
-document.addEventListener("click", (event) => {
-  if (!event.target.closest(".grade-picker")) closeGradeMenu();
+styleSlider.addEventListener("input", () => {
+  const style = styleSlider.value === "1" ? "detail" : "short";
+  paintStyle(style);
+  state.profile.explain_style = style;
+  if (saveButton.textContent !== "Сохранить") saveButton.textContent = "Сохранить";
 });
 document.addEventListener("keydown", (event) => {
   if (event.key === "Escape") {
-    closeGradeMenu();
     closeConfirm();
     closeStar();
   }
@@ -1136,7 +1593,8 @@ document.querySelector("#profile-form").addEventListener("submit", async (event)
   event.preventDefault();
   const name = nameInput.value.trim();
   const grade = Number(gradeInput.value);
-  const style = document.querySelector("[data-style].active");
+  const style = styleSlider.value === "1" ? "detail" : "short";
+  const goal = goalInput.value || null;
   if (!name) {
     saveStatus.className = "status error";
     saveStatus.textContent = "Напиши имя.";
@@ -1147,12 +1605,22 @@ document.querySelector("#profile-form").addEventListener("submit", async (event)
     saveStatus.textContent = "Выбери класс от 5 до 11.";
     return;
   }
+  if (!goal || !["oge", "ege", "self"].includes(goal)) {
+    saveStatus.className = "status error";
+    saveStatus.textContent = "Выбери цель.";
+    return;
+  }
   saveButton.disabled = true;
   saveStatus.textContent = "";
   saveStatus.className = "status";
   try {
-    const payload = { first_name: name, grade, reminders: remindersInput.checked };
-    if (style) payload.explain_style = style.dataset.style;
+    const payload = {
+      first_name: name,
+      grade,
+      reminders: remindersInput.checked,
+      explain_style: style,
+      exam_goal: goal
+    };
     const response = await fetch("/api/profile", {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
@@ -1168,12 +1636,14 @@ document.querySelector("#profile-form").addEventListener("submit", async (event)
     state.profile = data;
     nameInput.value = data.first_name || "";
     setGrade(data.grade, false);
-    paintStyle(data.explain_style || "");
+    setGoal(data.exam_goal || "", false);
+    paintStyle(data.explain_style || "short");
     remindersInput.checked = data.reminders !== false;
     paintIdentity();
     paintHome();
     paintNotes();
     paintTopics();
+    paintProfileStats();
     previewFromForm();
     saveButton.textContent = "Сохранено";
   } finally {
