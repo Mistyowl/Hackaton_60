@@ -3,6 +3,9 @@ const DENIED = "Кабинет пока открыт только для уча�
 const NO_CHAT = "Напиши Люми в чате MAX — там можно спросить задачу или прислать фото.";
 const EMPTY_NOTES = "Конспекты появятся, когда в чате нажмёшь «В конспект».";
 const EMPTY_ERRORS = "Банк ошибок пуст. Ошибки появятся после квиза или проверки решения в чате.";
+const EMPTY_CALENDAR = "Пока нечего ставить в календарь.";
+const CALENDAR_OPENED = "В Календаре нажми «Найти», потом «Добавить подписку».";
+const CALENDAR_READY = "Готово — нажми «В календарь» ещё раз.";
 const CHEV = '<span class="chev"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 6l6 6-6 6"/></svg></span>';
 const PIN = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 4h6l-1 7 3 3v2H7v-2l3-3-1-7z"/><path d="M12 16v5"/></svg>';
 const MARK = '<span class="mark"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M5 12l5 5L20 7"/></svg></span>';
@@ -39,7 +42,9 @@ const state = {
   quizReturn: "home",
   quizKind: "topic",
   loadingFrom: "quiz",
-  screen: "home"
+  screen: "home",
+  calendarUrl: null,
+  calendarHttpsUrl: null
 };
 let quiz = null;
 let currentNote = null;
@@ -964,6 +969,86 @@ async function openErrors(from) {
     state.errorsFilter = "all";
   }
   paintErrorBank();
+  prepareCalendarLink().catch(() => {
+    state.calendarUrl = null;
+    state.calendarHttpsUrl = null;
+  });
+}
+
+async function prepareCalendarLink() {
+  state.calendarUrl = null;
+  state.calendarHttpsUrl = null;
+  const response = await fetch("/api/calendar/link", { method: "POST" });
+  if (locked(response)) return false;
+  if (!response.ok) {
+    return false;
+  }
+  const data = await response.json().catch(() => ({}));
+  if (typeof data.token !== "string" || !data.token) {
+    return false;
+  }
+  const httpsUrl = new URL(
+    "/api/calendar.ics?t=" + encodeURIComponent(data.token),
+    window.location.origin
+  ).href;
+  // webcal:// — родной экран подписки iOS; https оставляем запасным.
+  state.calendarUrl = httpsUrl.replace(/^https:/i, "webcal:");
+  state.calendarHttpsUrl = httpsUrl;
+  return true;
+}
+
+function openCalendarLink(url) {
+  const app = bridge();
+  // В WebView MAX .ics молчит — нужен системный Календарь / Safari через Bridge.
+  if (app && typeof app.openLink === "function") {
+    try {
+      app.openLink(url);
+      return;
+    } catch (error) {
+      if (state.calendarHttpsUrl && url !== state.calendarHttpsUrl) {
+        app.openLink(state.calendarHttpsUrl);
+        return;
+      }
+      throw error;
+    }
+  }
+  window.open(url, "_blank", "noopener");
+}
+
+async function downloadCalendar() {
+  const button = document.querySelector("#export-calendar");
+  const status = document.querySelector("#error-status");
+  button.disabled = true;
+  status.className = "status";
+  status.textContent = "";
+  try {
+    // openLink работает только в том же клике — без await перед вызовом.
+    const url = state.calendarUrl;
+    if (url) {
+      openCalendarLink(url);
+      status.className = "status";
+      status.textContent = CALENDAR_OPENED;
+      showToast(CALENDAR_OPENED);
+      return;
+    }
+    const ready = await prepareCalendarLink();
+    if (!ready || !state.calendarUrl) {
+      status.className = "status error";
+      status.textContent = EMPTY_CALENDAR;
+      showToast(EMPTY_CALENDAR);
+      return;
+    }
+    status.className = "status";
+    status.textContent = CALENDAR_READY;
+    showToast(CALENDAR_READY);
+  } catch (error) {
+    status.className = "status error";
+    status.textContent = "Не удалось открыть календарь.";
+    showToast("Не удалось открыть календарь.");
+    throw error;
+  } finally {
+    button.disabled = false;
+  }
 }
 
 function splitPrompt(prompt) {
@@ -1737,6 +1822,7 @@ document.querySelector("#topic-list").addEventListener("click", (event) => {
 });
 document.querySelector("#start-topic").addEventListener("click", () => startQuiz("topic").catch(() => showGate("Кабинет не смог открыть базу.")));
 document.querySelector("#start-errors").addEventListener("click", () => startQuiz("errors").catch(() => showGate("Кабинет не смог открыть базу.")));
+document.querySelector("#export-calendar").addEventListener("click", () => downloadCalendar().catch(() => showGate("Кабинет не смог открыть базу.")));
 document.querySelector("#quiz-options").addEventListener("click", (event) => {
   const button = event.target.closest("[data-option]");
   if (!button || !quiz || quiz.feedback || quiz.busy) return;

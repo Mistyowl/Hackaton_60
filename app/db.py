@@ -167,7 +167,16 @@ CREATE TABLE IF NOT EXISTS cabinet_sessions (
     user_id INTEGER NOT NULL,
     expires_at TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS calendar_tokens (
+    token TEXT PRIMARY KEY,
+    user_id INTEGER NOT NULL,
+    expires_at TEXT NOT NULL
+);
 """
+
+# Подписка iOS перезапрашивает ленту — токен должен жить дольше одного открытия.
+CALENDAR_TOKEN_MINUTES = 60 * 24 * 30
 
 
 def _moscow_day(value: str) -> date | None:
@@ -413,6 +422,49 @@ class Database:
         )
         await self.conn.commit()
         return token
+
+    async def create_calendar_token(self, user_id: int) -> str:
+        await self.conn.execute(
+            "DELETE FROM calendar_tokens WHERE expires_at <= ?",
+            (utcnow(),),
+        )
+        cursor = await self.conn.execute(
+            """
+            SELECT token FROM calendar_tokens
+            WHERE user_id = ? AND expires_at > ?
+            ORDER BY expires_at DESC
+            LIMIT 1
+            """,
+            (user_id, utcnow()),
+        )
+        existing = await cursor.fetchone()
+        if existing is not None:
+            await self.conn.commit()
+            return str(existing["token"])
+        token = secrets.token_urlsafe(24)
+        await self.conn.execute(
+            """
+            INSERT INTO calendar_tokens (token, user_id, expires_at)
+            VALUES (?, ?, ?)
+            """,
+            (token, user_id, _until(CALENDAR_TOKEN_MINUTES)),
+        )
+        await self.conn.commit()
+        return token
+
+    async def resolve_calendar_token(self, token: str) -> int | None:
+        cleaned = (token or "").strip()
+        if not cleaned:
+            return None
+        cursor = await self.conn.execute(
+            """
+            SELECT user_id FROM calendar_tokens
+            WHERE token = ? AND expires_at > ?
+            """,
+            (cleaned, utcnow()),
+        )
+        row = await cursor.fetchone()
+        return int(row["user_id"]) if row is not None else None
 
     async def cabinet_user(self, token: str) -> dict | None:
         if not token:

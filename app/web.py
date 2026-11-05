@@ -5,11 +5,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 
 from app.bot.render import EMPTY_ERRORS
 from app.config import ACCESS_CLOSED, user_allowed
 from app.db import CABINET_SESSION_MINUTES, WEEK_GOAL, Database
+from app.services.calendar_export import EMPTY_CALENDAR, build_calendar
 from app.services.limits import LIMIT_MESSAGE, allow
 from app.services.notes import SearchLimited, save_manual, search_notes
 from app.services.reminders import moscow_now
@@ -404,6 +405,51 @@ def create_app(
                 }
             )
         return {"counts": counts, "items": items}
+
+    @app.post("/api/calendar/link")
+    async def calendar_link(request: Request) -> dict:
+        user = await student(request)
+        user_id = int(user["user_id"])
+        payload = build_calendar(
+            await db.list_error_bank(user_id, limit=40),
+            await db.list_skills(user_id),
+            moscow_now(),
+        )
+        if payload is None:
+            raise HTTPException(status_code=409, detail=EMPTY_CALENDAR)
+        token = await db.create_calendar_token(user_id)
+        # URL собирает клиент из origin кабинета — за прокси request.base_url часто http://127.0.0.1.
+        return {"token": token}
+
+    @app.get("/api/calendar.ics")
+    async def calendar_ics(request: Request) -> Response:
+        raw_token = request.query_params.get("t", "")
+        if isinstance(raw_token, str) and raw_token.strip():
+            user_id = await db.resolve_calendar_token(raw_token)
+            if user_id is None:
+                raise HTTPException(
+                    status_code=401,
+                    detail="Ссылка устарела. Вернись в кабинет и нажми «В календарь» ещё раз.",
+                )
+        else:
+            user = await student(request)
+            user_id = int(user["user_id"])
+        payload = build_calendar(
+            await db.list_error_bank(user_id, limit=40),
+            await db.list_skills(user_id),
+            moscow_now(),
+        )
+        if payload is None:
+            raise HTTPException(status_code=409, detail=EMPTY_CALENDAR)
+        return Response(
+            content=payload,
+            media_type="text/calendar; charset=utf-8",
+            headers={
+                **NO_STORE,
+                # inline — в Safari на iPhone открывает «Добавить в Календарь».
+                "Content-Disposition": 'inline; filename="lumi-povtoreniya.ics"',
+            },
+        )
 
     @app.post("/api/quizzes/topic")
     async def quiz_topic(request: Request) -> dict:

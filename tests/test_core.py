@@ -37,6 +37,7 @@ from app.services.notes import (
     student_dossier,
 )
 from app.bot.render import render_check, render_feedback
+from app.services.calendar_export import EMPTY_CALENDAR, build_calendar, next_evening_slot
 from app.services.reminders import MOSCOW, in_quiet_hours, reminder_text
 from app.services.skills import (
     _local_skill_match,
@@ -1643,6 +1644,168 @@ class PlanFeatureTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await self.db.home_stats(2, today))["streak_days"], 0)
         async with self._client(week_goal=7) as client:
             self.assertEqual((await client.get("/api/home")).json()["week_goal"], 7)
+
+    async def test_calendar_link_token_opens_without_cookie(self) -> None:
+        await self.db.insert_error(1, "Алгебра", "2x=4", "деление", "разбор")
+        app = create_app(self.db, FakeTutor(), BOT_TOKEN)
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="https://cabinet") as client:
+            await client.post("/api/session", json={"init_data": _init_data(1, "Аня")})
+            linked = await client.post("/api/calendar/link")
+            self.assertEqual(linked.status_code, 200)
+            token = linked.json()["token"]
+            self.assertTrue(token)
+        async with AsyncClient(transport=transport, base_url="https://cabinet") as anon:
+            first = await anon.get("/api/calendar.ics", params={"t": token})
+            self.assertEqual(first.status_code, 200)
+            self.assertIn("text/calendar", first.headers["content-type"])
+            self.assertIn("inline", first.headers["content-disposition"])
+            self.assertIn("2x=4", first.text)
+            again = await anon.get("/api/calendar.ics", params={"t": token})
+            self.assertEqual(again.status_code, 200)
+            self.assertIn("2x=4", again.text)
+        async with AsyncClient(transport=transport, base_url="https://cabinet") as empty:
+            await empty.post("/api/session", json={"init_data": _init_data(3, "Вася")})
+            self.assertEqual((await empty.post("/api/calendar/link")).status_code, 409)
+
+    async def test_calendar_export_keeps_owner_events(self) -> None:
+        noon = datetime(2026, 11, 5, 12, 0, tzinfo=MOSCOW)
+        skill_id = await self.db.insert_skill(
+            1,
+            "Алгебра",
+            "деление дробей",
+            0.4,
+            2,
+            utcnow(),
+            (noon + timedelta(days=1)).astimezone(timezone.utc).isoformat(timespec="seconds"),
+        )
+        await self.db.insert_error(
+            1,
+            "Алгебра",
+            "Уравнение, 2x=4",
+            "не разделил",
+            "СКРЫТЫЙ РАЗБОР",
+            skill_id,
+        )
+        closed = await self.db.insert_error(1, "Физика", "закрытая", "формула", "разбор")
+        await self.db.conn.execute(
+            "UPDATE errors SET resolved_at = ? WHERE id = ?",
+            (utcnow(), closed),
+        )
+        await self.db.conn.commit()
+        overdue = await self.db.insert_skill(
+            1,
+            "Геометрия",
+            "площадь треугольника",
+            0.2,
+            1,
+            utcnow(),
+            (noon - timedelta(days=2)).astimezone(timezone.utc).isoformat(timespec="seconds"),
+        )
+        future = await self.db.insert_skill(
+            1,
+            "Алгебра",
+            "квадрат числа",
+            0.6,
+            3,
+            utcnow(),
+            (noon + timedelta(days=3)).astimezone(timezone.utc).isoformat(timespec="seconds"),
+        )
+        await self.db.insert_error(2, "Физика", "чужая задача", "секрет Бори", "чужой разбор")
+        await self.db.insert_skill(
+            2,
+            "Физика",
+            "чужой навык",
+            0.4,
+            2,
+            utcnow(),
+            (noon + timedelta(days=3)).astimezone(timezone.utc).isoformat(timespec="seconds"),
+        )
+
+        app = create_app(self.db, FakeTutor(), BOT_TOKEN)
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="https://cabinet") as anon:
+            self.assertEqual((await anon.get("/api/calendar.ics")).status_code, 401)
+
+        async with AsyncClient(transport=transport, base_url="https://cabinet") as client:
+            await client.post("/api/session", json={"init_data": _init_data(1, "Аня")})
+            with patch("app.web.moscow_now", return_value=noon):
+                response = await client.get("/api/calendar.ics")
+            self.assertEqual(response.status_code, 200)
+            self.assertIn("text/calendar", response.headers["content-type"])
+            disposition = response.headers["content-disposition"]
+            self.assertIn("inline", disposition)
+            self.assertIn("lumi-povtoreniya.ics", disposition)
+            body = response.text
+            self.assertIn("SUMMARY:Разобрать: деление дробей", body)
+            self.assertIn("Уравнение\\, 2x=4", body)
+            self.assertNotIn("закрытая", body)
+            self.assertNotIn("чужая задача", body)
+            self.assertNotIn("чужой навык", body)
+            self.assertNotIn("СКРЫТЫЙ РАЗБОР", body)
+            self.assertIn("UID:lumi-error-", body)
+            self.assertIn(f"UID:lumi-skill-{overdue}@tutor", body)
+            self.assertIn(f"UID:lumi-skill-{future}@tutor", body)
+            self.assertNotIn(f"UID:lumi-skill-{skill_id}@tutor", body)
+            self.assertIn("DTSTART:20261105T160000Z", body)
+            self.assertIn("DTSTART:20261106T160000Z", body)
+            self.assertIn("DTSTART:20261108T160000Z", body)
+            self.assertIn("Повторить: площадь треугольника", body)
+            self.assertIn("Повторить: квадрат числа", body)
+
+        async with AsyncClient(transport=transport, base_url="https://cabinet") as stranger:
+            await stranger.post("/api/session", json={"init_data": _init_data(2, "Боря")})
+            other = await stranger.get("/api/calendar.ics")
+            self.assertEqual(other.status_code, 200)
+            self.assertIn("чужая задача", other.text)
+            self.assertNotIn("деление дробей", other.text)
+
+        async with AsyncClient(transport=transport, base_url="https://cabinet") as blank:
+            await blank.post("/api/session", json={"init_data": _init_data(3, "Вася")})
+            empty = await blank.get("/api/calendar.ics")
+            self.assertEqual(empty.status_code, 409)
+            self.assertEqual(empty.json()["detail"], EMPTY_CALENDAR)
+
+    def test_calendar_builder_escapes_and_slots(self) -> None:
+        noon = datetime(2026, 11, 5, 12, 0, tzinfo=MOSCOW)
+        self.assertEqual(next_evening_slot(noon).hour, 19)
+        late = datetime(2026, 11, 5, 19, 30, tzinfo=MOSCOW)
+        self.assertEqual(next_evening_slot(late).day, 6)
+        payload = build_calendar(
+            [
+                {
+                    "id": 12,
+                    "subject": "Алгебра",
+                    "problem": "Сложи a, b",
+                    "mistake": "знаки",
+                    "skill_name": "сложение",
+                    "skill_id": 5,
+                    "resolved_at": None,
+                }
+            ],
+            [
+                {
+                    "id": 5,
+                    "subject": "Алгебра",
+                    "name": "сложение",
+                    "due_at": (noon + timedelta(days=2)).isoformat(timespec="seconds"),
+                },
+                {
+                    "id": 9,
+                    "subject": "Геометрия",
+                    "name": "углы",
+                    "due_at": (noon - timedelta(days=1)).isoformat(timespec="seconds"),
+                },
+            ],
+            noon,
+        )
+        assert payload is not None
+        self.assertIn("SUMMARY:Разобрать: сложение", payload)
+        self.assertIn("Сложи a\\, b", payload)
+        self.assertIn("UID:lumi-error-12@tutor", payload)
+        self.assertIn("UID:lumi-skill-9@tutor", payload)
+        self.assertNotIn("UID:lumi-skill-5@tutor", payload)
+        self.assertIsNone(build_calendar([], [], noon))
 
 
 class RenderCleanupTests(unittest.TestCase):
