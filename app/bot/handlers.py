@@ -41,8 +41,8 @@ from app.bot.render import (
     render_search,
 )
 from app.config import ACCESS_CLOSED, user_allowed
-from app.services.limits import allow
 from app.db import Database
+from app.services.limits import LIMIT_MESSAGE, allow
 from app.services.notes import (
     PAGE_SIZE,
     onboard_step,
@@ -55,7 +55,16 @@ from app.services.notes import (
 )
 from app.services.quiz import answer_question, ensure_topic, start_error_quiz, start_topic_quiz
 from app.services.tutor import Tutor, TutorError, TutorReply
-from app.textutil import check_prefix, clip, esc, image_mime, model_html, parse_command
+from app.textutil import (
+    audio_filename_ok,
+    audio_mime,
+    check_prefix,
+    clip,
+    esc,
+    image_mime,
+    model_html,
+    parse_command,
+)
 
 log = logging.getLogger(__name__)
 ASSETS = Path(__file__).resolve().parent.parent / "assets"
@@ -65,6 +74,9 @@ TOUR_IMAGES = [
     InputMedia(str(ASSETS / "tour-check.jpg")),
     InputMedia(str(ASSETS / "tour-cabinet.jpg")),
 ]
+AUDIO_LIMIT = 8 * 1024 * 1024
+VOICE_DOWNLOAD_FAIL = "Не смогла скачать голосовое. Пришли ещё раз или напиши текстом."
+VOICE_TOO_BIG = "Голосовое слишком длинное. Пришли запись до 8 МБ или напиши текстом."
 
 
 class BotApp:
@@ -128,7 +140,7 @@ class BotApp:
             await self.send(
                 chat_id,
                 user_id,
-                "Не получилось обработать сообщение. Попробуйте ещё раз.",
+                "Не получилось обработать сообщение. Попробуй ещё раз.",
                 self._menu(),
             )
 
@@ -149,13 +161,16 @@ class BotApp:
             await self.send(
                 chat_id,
                 user_id,
-                "Не получилось выполнить действие. Откройте меню и попробуйте ещё раз.",
+                "Не получилось выполнить действие. Открой меню и попробуй ещё раз.",
                 self._menu(),
             )
 
     async def _on_message(self, event: MessageCreated) -> None:
         chat_id, user_id, first_name = self._person(event)
         if user_id is None:
+            # Пустой message_created без отправителя — известный баг MAX
+            # для нативных голосовых на long polling.
+            log.warning("message_created без отправителя — пропуск")
             return
         if not self._allowed(user_id):
             log.info("Отказ в доступе user_id=%s", user_id)
@@ -166,25 +181,32 @@ class BotApp:
         body = event.message.body
         text = (body.text or "").strip() if body else ""
         image_url = self._image_url(event)
+        audio = self._audio_attachment(event)
         command = parse_command(text) if text else None
         if command is not None:
             await self._handle_command(chat_id, user_id, command[0], command[1])
             return
         step = await self._onboard_step(user_id)
         if step:
-            if text or image_url:
+            if text or image_url or audio is not None:
                 await self._send_onboarding(chat_id, user_id, step, nudge=True)
             return
         if image_url:
             await self._handle_photo(chat_id, user_id, image_url, text)
             return
+        if audio is not None:
+            await self._handle_voice(chat_id, user_id, audio)
+            return
         if not text:
             return
+        await self._dispatch_text(chat_id, user_id, text)
+
+    async def _dispatch_text(self, chat_id, user_id: int, text: str) -> None:
         prefixed = check_prefix(text)
         if prefixed is not None:
             await self.db.set_mode(user_id, "chat")
             if not prefixed:
-                await self.send(chat_id, user_id, "После «проверь» напишите решение.", back_keyboard())
+                await self.send(chat_id, user_id, "После «проверь» напиши решение.", back_keyboard())
                 return
             await self._handle_check_text(chat_id, user_id, prefixed)
             return
@@ -251,10 +273,6 @@ class BotApp:
             await self.db.set_mode(user_id, "search")
             await self.show(event, SEARCH_PROMPT, back_keyboard())
             return
-        if payload == "menu:quiz":
-            await self.db.set_mode(user_id, "quiz_topic")
-            await self.show(event, QUIZ_PROMPT, back_keyboard())
-            return
         if payload == "menu:own":
             await self.db.set_mode(user_id, "save_note")
             await self.show(event, OWN_PROMPT, back_keyboard())
@@ -264,12 +282,6 @@ class BotApp:
                 await self._offer_cabinet(event, chat_id, user_id)
                 return
             await self._show_notes(event, user_id, 0)
-            return
-        if payload == "menu:errors":
-            await self._start_error_quiz(event, chat_id, user_id)
-            return
-        if payload == "menu:cabinet":
-            await self._offer_cabinet(event, chat_id, user_id)
             return
         if payload.startswith("note:page:"):
             page = _payload_int(payload, 2)
@@ -318,6 +330,10 @@ class BotApp:
             if question_id is None or option is None:
                 return
             await self._answer_quiz(event, user_id, question_id, option)
+            return
+        log.info("Неизвестная кнопка user_id=%s", user_id)
+        await self.db.set_mode(user_id, "chat")
+        await self.show(event, WELCOME, self._menu(), notification="Кнопка устарела, вот меню")
 
     async def _onboard_step(self, user_id: int) -> str | None:
         return onboard_step(await self.db.get_user(user_id))
@@ -413,7 +429,7 @@ class BotApp:
             await self.db.set_mode(user_id, "chat")
             await self._send_error_quiz(chat_id, user_id)
             return
-        await self.send(chat_id, user_id, "Такой команды нет. Выберите действие в меню.", self._menu())
+        await self.send(chat_id, user_id, "Такой команды нет. Выбери действие в меню.", self._menu())
 
     async def _guard(self, chat_id, user_id: int) -> bool:
         if allow(user_id):
@@ -421,7 +437,7 @@ class BotApp:
         await self.send(
             chat_id,
             user_id,
-            "Слишком много запросов. Попробуйте через час.",
+            LIMIT_MESSAGE,
             self._menu(),
         )
         return False
@@ -462,7 +478,7 @@ class BotApp:
             await self.send(
                 chat_id,
                 user_id,
-                "Не смогла скачать фото. Пришлите его ещё раз.",
+                "Не смогла скачать фото. Пришли его ещё раз.",
                 self._menu(),
             )
             return
@@ -470,7 +486,7 @@ class BotApp:
             await self.send(
                 chat_id,
                 user_id,
-                "Фото слишком большое. Пришлите снимок до 8 МБ, лучше JPG или PNG.",
+                "Фото слишком большое. Пришли снимок до 8 МБ, лучше JPG или PNG.",
                 self._menu(),
             )
             return
@@ -481,6 +497,36 @@ class BotApp:
             return
         await self.db.set_mode(user_id, "chat")
         await self._present_check(chat_id, user_id, result)
+
+    async def _handle_voice(
+        self,
+        chat_id,
+        user_id: int,
+        audio: tuple[str, str | None, str],
+    ) -> None:
+        url, ready_text, filename = audio
+        text = (ready_text or "").strip()
+        if not text:
+            if not await self._guard(chat_id, user_id):
+                return
+            await self.send(chat_id, user_id, "Слушаю...", None)
+            try:
+                data = await self.bot.download_bytes(url)
+            except Exception:
+                log.exception("voice download failed")
+                await self.send(chat_id, user_id, VOICE_DOWNLOAD_FAIL, self._menu())
+                return
+            if len(data) > AUDIO_LIMIT:
+                await self.send(chat_id, user_id, VOICE_TOO_BIG, self._menu())
+                return
+            try:
+                text = await self.tutor.transcribe(data, audio_mime(data, filename))
+            except TutorError as error:
+                await self.send(chat_id, user_id, esc(error.user_message), self._menu())
+                return
+        else:
+            await self.send(chat_id, user_id, "Слушаю...", None)
+        await self._dispatch_text(chat_id, user_id, text)
 
     async def _present_check(self, chat_id, user_id: int, result) -> None:
         check_id = await register_check(self.db, user_id, result, self.tutor)
@@ -495,7 +541,9 @@ class BotApp:
 
     async def _handle_search(self, chat_id, user_id: int, query: str) -> None:
         try:
-            hits = await search_notes(self.db, self.tutor, user_id, query)
+            hits = await search_notes(
+                self.db, self.tutor, user_id, query, spend=lambda: allow(user_id)
+            )
         except TutorError as error:
             await self.send(chat_id, user_id, esc(error.user_message), self._menu())
             return
@@ -575,7 +623,7 @@ class BotApp:
     async def _save_tutor(self, event: MessageCallback, chat_id, user_id: int) -> None:
         last = await self.db.get_last_tutor(user_id)
         if last is None:
-            await self._notify(event, "Сначала попросите разбор")
+            await self._notify(event, "Сначала попроси разбор")
             return
         reply = TutorReply(**last)
         note_id = await save_reply(self.db, user_id, reply, "chat")
@@ -590,7 +638,7 @@ class BotApp:
     async def _simpler(self, event: MessageCallback, chat_id, user_id: int) -> None:
         last = await self.db.get_last_tutor(user_id)
         if last is None:
-            await self._notify(event, "Сначала попросите разбор")
+            await self._notify(event, "Сначала попроси разбор")
             return
         if not await self._guard(chat_id, user_id):
             return
@@ -607,7 +655,7 @@ class BotApp:
     async def _similar_tutor(self, event: MessageCallback, chat_id, user_id: int) -> None:
         last = await self.db.get_last_tutor(user_id)
         if last is None:
-            await self._notify(event, "Сначала попросите разбор")
+            await self._notify(event, "Сначала попроси разбор")
             return
         if not await self._guard(chat_id, user_id):
             return
@@ -636,7 +684,7 @@ class BotApp:
         if check is None:
             await self._notify(event, "Эта проверка уже недоступна")
             return
-        solution = check["full_explanation"] or "Полный разбор не собрался. Пришлите решение ещё раз."
+        solution = check["full_explanation"] or "Полный разбор не собрался. Пришли решение ещё раз."
         await self._notify(event, "Показываю полный разбор")
         await self.send(chat_id, user_id, model_html(solution), check_keyboard(check["id"], True))
 
@@ -674,13 +722,6 @@ class BotApp:
         await self._remember_reply(user_id, "Похожая задача", reply)
         await self.send(chat_id, user_id, model_html(reply.reply), tutor_keyboard(bool(reply.full_solution)))
 
-    async def _start_error_quiz(self, event: MessageCallback, chat_id, user_id: int) -> None:
-        if await self.db.count_errors(user_id) == 0:
-            await self.show(event, EMPTY_ERRORS, self._menu())
-            return
-        await self._notify(event, "Собираю квиз по ошибкам")
-        await self._send_error_quiz(chat_id, user_id)
-
     async def _send_error_quiz(self, chat_id, user_id: int) -> None:
         if await self.db.count_errors(user_id) == 0:
             await self.send(chat_id, user_id, EMPTY_ERRORS, self._menu())
@@ -701,7 +742,7 @@ class BotApp:
     async def _send_quiz(self, chat_id, user_id: int, quiz_id: int) -> None:
         text, question = await self._quiz_screen(quiz_id)
         if question is None:
-            await self.send(chat_id, user_id, "Квиз не собрался. Попробуйте ещё раз.", self._menu())
+            await self.send(chat_id, user_id, "Квиз не собрался. Попробуй ещё раз.", self._menu())
             return
         await self.send(chat_id, user_id, text, quiz_keyboard(question["id"], option_count(question)))
 
@@ -755,7 +796,7 @@ class BotApp:
         await self.send(
             chat_id,
             user_id,
-            "Кабинет откроется вашим: конспекты и поиск.",
+            "В кабинете твои конспекты, поиск и банк ошибок.",
             cabinet_keyboard(self.web_app),
         )
 
@@ -845,6 +886,32 @@ class BotApp:
             if url:
                 return url
         return None
+
+    def _audio_attachment(
+        self, event: MessageCreated
+    ) -> tuple[str, str | None, str] | None:
+        body = event.message.body
+        if body is None or not body.attachments:
+            return None
+        return voice_from_attachments(body.attachments)
+
+
+def voice_from_attachments(attachments) -> tuple[str, str | None, str] | None:
+    for attachment in attachments or []:
+        payload = getattr(attachment, "payload", None)
+        url = getattr(payload, "url", None) if payload is not None else None
+        if not url:
+            continue
+        kind = getattr(attachment, "type", None)
+        if kind == AttachmentType.AUDIO or kind == AttachmentType.AUDIO.value:
+            ready = getattr(attachment, "transcription", None)
+            text = ready.strip() if isinstance(ready, str) and ready.strip() else None
+            return url, text, ""
+        if kind == AttachmentType.FILE or kind == AttachmentType.FILE.value:
+            filename = getattr(attachment, "filename", None) or ""
+            if audio_filename_ok(filename):
+                return url, None, filename
+    return None
 
 
 def _payload_int(payload: str, index: int) -> int | None:

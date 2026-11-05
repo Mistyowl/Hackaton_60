@@ -1,47 +1,79 @@
 import json
 import tempfile
 import unittest
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from unittest.mock import patch
 
 from httpx import ASGITransport, AsyncClient
 
 from app.bot.commands import bot_commands
-from app.config import gemini_proxy_url, parse_allowed_user_ids, user_allowed
+from app.bot.handlers import voice_from_attachments
+from app.config import (
+    gemini_proxy_url,
+    parse_allowed_user_ids,
+    user_allowed,
+    validate_webhook,
+    webhook_path,
+)
 from app.services.tutor import Tutor
+from maxapi.enums.attachment import AttachmentType
+from maxapi.types.attachments.attachment import OtherAttachmentPayload
+from maxapi.types.attachments.audio import Audio
+from maxapi.types.attachments.file import File
 from maxapi.types.updates.message_callback import MessageForCallback
 
 from app.bot.keyboards import cabinet_keyboard, grade_keyboard, menu_keyboard, style_keyboard
 from app.db import Database
 from app.services.limits import allow, reset
-from app.services.notes import onboard_step, register_check, save_manual, search_notes, student_dossier
-from app.services.reminders import in_quiet_hours, reminder_line
+from app.services.notes import (
+    manual_title,
+    onboard_step,
+    register_check,
+    save_manual,
+    search_notes,
+    student_dossier,
+)
+from app.bot.render import render_check, render_feedback
+from app.services.reminders import MOSCOW, in_quiet_hours, reminder_text
 from app.services.skills import (
     _local_skill_match,
     brightness,
     next_box,
     normalize_name,
     record,
-    sky_payload,
-    star_position,
 )
-from app.services.quiz import answer_question
+from app.services.quiz import AnswerView, answer_question, start_error_quiz, start_topic_quiz
 from app.services.tutor import (
+    QUIZ_OUTPUT_TOKENS,
+    QUOTA_MESSAGE,
+    RETRY_CAP_SECONDS,
     CheckResult,
     QuestionDraft,
     TutorError,
     _QuestionSchema,
     _QuizSchema,
+    _TutorSchema,
+    _coerce_quiz_payload,
+    _error_kind,
+    _fallback_models,
+    _retry_seconds,
+    _schema_in_api,
     normalize_quiz,
 )
 from app.textutil import (
     MARK_END,
     MARK_START,
+    audio_filename_ok,
+    audio_mime,
     check_prefix,
     format_elapsed,
     fts_match,
     markers_to_html,
     model_html,
+    normalize_subject,
     parse_command,
     utcnow,
 )
@@ -81,6 +113,61 @@ class TextTests(unittest.TestCase):
         self.assertIn("<b>Пример:</b>\n<b>a/b : c/d = a/b * d/c</b>", model_html(sample))
         self.assertIn("Дальше", model_html(sample))
         self.assertEqual(fts_match('знак "переноса"'), '"знак" AND "переноса"')
+
+    def test_audio_mime_and_filename(self) -> None:
+        self.assertEqual(audio_mime(b"OggS...." ), "audio/ogg")
+        self.assertEqual(audio_mime(b"ID3...." ), "audio/mpeg")
+        self.assertEqual(audio_mime(b"RIFF....WAVE....", "x.wav"), "audio/wav")
+        self.assertEqual(audio_mime(b"????", "lesson.m4a"), "audio/mp4")
+        self.assertTrue(audio_filename_ok("voice.ogg"))
+        self.assertTrue(audio_filename_ok("HW.M4A"))
+        self.assertFalse(audio_filename_ok("notes.pdf"))
+
+
+class VoiceAttachmentTests(unittest.TestCase):
+    def test_prefers_audio_transcription(self) -> None:
+        audio = Audio(
+            type=AttachmentType.AUDIO,
+            payload=OtherAttachmentPayload(url="https://cdn.example/a.ogg", token="t"),
+            transcription="  Как решить уравнение?  ",
+        )
+        found = voice_from_attachments([audio])
+        self.assertEqual(found, ("https://cdn.example/a.ogg", "Как решить уравнение?", ""))
+
+    def test_accepts_audio_file_by_name(self) -> None:
+        file = File(
+            type=AttachmentType.FILE,
+            payload=OtherAttachmentPayload(url="https://cdn.example/v.aac", token="t"),
+            filename="voice.aac",
+            size=1200,
+        )
+        found = voice_from_attachments([file])
+        self.assertEqual(found, ("https://cdn.example/v.aac", None, "voice.aac"))
+
+    def test_skips_non_audio_file(self) -> None:
+        file = File(
+            type=AttachmentType.FILE,
+            payload=OtherAttachmentPayload(url="https://cdn.example/x.pdf", token="t"),
+            filename="x.pdf",
+            size=10,
+        )
+        self.assertIsNone(voice_from_attachments([file]))
+
+
+class WebhookConfigTests(unittest.TestCase):
+    def test_webhook_path_and_validation(self) -> None:
+        self.assertEqual(webhook_path("https://bot.example/max-webhook"), "/max-webhook")
+        self.assertEqual(webhook_path("https://bot.example/"), "/max-webhook")
+        url, secret = validate_webhook(
+            "https://bot.example/max-webhook", "secret-1"
+        )
+        self.assertEqual(url, "https://bot.example/max-webhook")
+        self.assertEqual(secret, "secret-1")
+        self.assertEqual(validate_webhook("", "secret-1"), ("", ""))
+        with self.assertRaises(ValueError):
+            validate_webhook("http://bot.example/max-webhook", "secret-1")
+        with self.assertRaises(ValueError):
+            validate_webhook("https://bot.example/max-webhook", "ab")
 
 
 class ProxyTests(unittest.TestCase):
@@ -165,6 +252,236 @@ class NormalizeTests(unittest.TestCase):
             normalize_quiz(pack, "Тема")
 
 
+class _FakeModels:
+    def __init__(self, behavior) -> None:
+        self.calls: list = []
+        self.models: list[str] = []
+        self.behavior = behavior
+
+    async def generate_content(self, model, contents, config):
+        self.calls.append(config)
+        self.models.append(model)
+        return self.behavior(config, model)
+
+
+class _FakeClient:
+    def __init__(self, models: _FakeModels) -> None:
+        self.aio = type("Aio", (), {"models": models})()
+
+
+class _FakeResponse:
+    def __init__(self, parsed) -> None:
+        self.parsed = parsed
+        self.text = ""
+
+
+class TutorGeminiTests(unittest.IsolatedAsyncioTestCase):
+    def _tutor(self, behavior) -> tuple[Tutor, _FakeModels]:
+        tutor = Tutor("test-key", "gemini-test")
+        models = _FakeModels(behavior)
+        tutor._client = _FakeClient(models)
+        return tutor, models
+
+    def test_retry_seconds_and_error_kind(self) -> None:
+        quota = Exception(
+            "429 RESOURCE_EXHAUSTED. Please retry in 46.10723102s. quota exceeded"
+        )
+        self.assertEqual(_error_kind(quota), "quota")
+        self.assertAlmostEqual(_retry_seconds(quota), 46.10723102)
+        self.assertEqual(_error_kind(Exception("503 UNAVAILABLE high demand")), "unavailable")
+        self.assertEqual(_error_kind(Exception("500 INTERNAL error encountered")), "unavailable")
+        self.assertEqual(_error_kind(Exception("boom")), "other")
+        self.assertFalse(_schema_in_api("gemma-4-31b-it"))
+        self.assertTrue(_schema_in_api("gemini-3.8-flash"))
+        self.assertEqual(
+            _fallback_models("gemini-3.8-flash, gemma-4-31b-it, gemini-3.8-flash", "gemini-3.5-flash-lite"),
+            ["gemini-3.8-flash", "gemma-4-31b-it"],
+        )
+
+    def test_coerce_quiz_payload_accepts_question_alias(self) -> None:
+        raw = json.dumps(
+            [
+                {
+                    "question": "2+2?",
+                    "options": ["1", "2", "3", "4"],
+                    "correct_index": 3,
+                    "explanation": "четыре",
+                }
+            ],
+            ensure_ascii=False,
+        )
+        pack = _QuizSchema.model_validate_json(_coerce_quiz_payload(raw))
+        self.assertEqual(pack.questions[0].prompt, "2+2?")
+        self.assertEqual(pack.questions[0].correct_index, 3)
+
+    async def test_thinking_unsupported_cached(self) -> None:
+        def behavior(config, model):
+            if getattr(config, "thinking_config", None) is not None:
+                raise Exception("INVALID_ARGUMENT: thinking is not supported")
+            return _FakeResponse(
+                _TutorSchema(reply="ок", subject="Алгебра", title="т", skill="с")
+            )
+
+        tutor, models = self._tutor(behavior)
+        first = await tutor._generate("sys", [], _TutorSchema, 0.4)
+        self.assertEqual(first.parsed.reply, "ок")
+        self.assertIs(tutor._thinking_ok["gemini-test"], False)
+        self.assertEqual(len(models.calls), 2)
+
+        await tutor._generate("sys", [], _TutorSchema, 0.4)
+        self.assertEqual(len(models.calls), 3)
+        self.assertIsNone(getattr(models.calls[-1], "thinking_config", None))
+
+    async def test_quota_retry_waits_before_second_call(self) -> None:
+        sleeps: list[float] = []
+
+        async def fake_sleep(seconds: float) -> None:
+            sleeps.append(seconds)
+
+        outcomes = iter(
+            [
+                Exception(
+                    "429 RESOURCE_EXHAUSTED. {'error': {'code': 429, "
+                    "'message': 'Please retry in 46.1s', 'status': 'RESOURCE_EXHAUSTED'}}"
+                ),
+                _FakeResponse(
+                    _TutorSchema(reply="готово", subject="Алгебра", title="т", skill="с")
+                ),
+            ]
+        )
+
+        def behavior(config, model):
+            item = next(outcomes)
+            if isinstance(item, Exception):
+                raise item
+            return item
+
+        tutor, models = self._tutor(behavior)
+        tutor._thinking_ok["gemini-test"] = False
+        with patch("app.services.tutor.asyncio.sleep", fake_sleep):
+            data = await tutor._ask("sys", [], _TutorSchema, 0.4)
+        self.assertEqual(data.reply, "готово")
+        self.assertEqual(sleeps, [RETRY_CAP_SECONDS])
+        self.assertEqual(len(models.calls), 2)
+
+    async def test_quota_exhausted_returns_user_message(self) -> None:
+        sleeps: list[float] = []
+
+        async def fake_sleep(seconds: float) -> None:
+            sleeps.append(seconds)
+
+        def behavior(config, model):
+            raise Exception(
+                "429 RESOURCE_EXHAUSTED. Please retry in 12s. quota exceeded"
+            )
+
+        tutor, _models = self._tutor(behavior)
+        tutor._thinking_ok["gemini-test"] = False
+        with patch("app.services.tutor.asyncio.sleep", fake_sleep):
+            with self.assertRaises(TutorError) as raised:
+                await tutor._ask("sys", [], _TutorSchema, 0.4)
+        self.assertEqual(raised.exception.user_message, QUOTA_MESSAGE)
+        self.assertEqual(sleeps, [12.0, 12.0])
+
+    async def test_fallback_model_used_when_primary_quota(self) -> None:
+        sleeps: list[float] = []
+
+        async def fake_sleep(seconds: float) -> None:
+            sleeps.append(seconds)
+
+        def behavior(config, model):
+            if model == "gemini-primary":
+                raise Exception(
+                    "429 RESOURCE_EXHAUSTED. Please retry in 46s. quota exceeded"
+                )
+            if model == "gemini-3.8-flash":
+                raise Exception("503 UNAVAILABLE high demand")
+            # Gemma без response_schema
+            self.assertIsNone(getattr(config, "response_schema", None))
+            return _FakeResponse(
+                _TutorSchema(reply="запас", subject="Алгебра", title="т", skill="с")
+            )
+
+        tutor = Tutor(
+            "test-key",
+            "gemini-primary",
+            fallback_model="gemini-3.8-flash,gemma-4-31b-it",
+        )
+        models = _FakeModels(behavior)
+        tutor._client = _FakeClient(models)
+        tutor._thinking_ok["gemini-primary"] = False
+        tutor._thinking_ok["gemini-3.8-flash"] = False
+        tutor._thinking_ok["gemma-4-31b-it"] = False
+        with patch("app.services.tutor.asyncio.sleep", fake_sleep):
+            data = await tutor._ask("sys", [], _TutorSchema, 0.4)
+        self.assertEqual(data.reply, "запас")
+        self.assertEqual(
+            models.models,
+            ["gemini-primary", "gemini-3.8-flash", "gemma-4-31b-it"],
+        )
+        self.assertEqual(sleeps, [])
+
+    async def test_gemma_skips_response_schema(self) -> None:
+        seen: dict = {}
+
+        async def generate_content(model, contents, config):
+            seen["schema"] = getattr(config, "response_schema", None)
+            seen["system"] = getattr(config, "system_instruction", None)
+            seen["user"] = contents[0].parts[0].text if contents else ""
+            return _FakeResponse(
+                _QuizSchema(
+                    title="Тема",
+                    questions=[
+                        _QuestionSchema(
+                            prompt=f"Вопрос {index}",
+                            options=["1", "2", "3", "4"],
+                            correct_index=0,
+                            explanation="так",
+                        )
+                        for index in range(4)
+                    ],
+                )
+            )
+
+        tutor = Tutor("test-key", "gemma-4-31b-it")
+        models = _FakeModels(lambda config, model: None)
+        models.generate_content = generate_content  # type: ignore[method-assign]
+        tutor._client = _FakeClient(models)
+        data = await tutor._ask("инструкция", [], _QuizSchema, 0.4)
+        self.assertIsNone(seen["schema"])
+        self.assertIsNone(seen["system"])
+        self.assertIn("инструкция", seen["user"])
+        self.assertIn("prompt", seen["user"])
+        self.assertEqual(len(data.questions), 4)
+
+    async def test_make_quiz_asks_with_larger_token_budget(self) -> None:
+        seen: dict = {}
+
+        async def fake_ask(system, contents, schema, temperature, max_output_tokens=2048):
+            seen["max_output_tokens"] = max_output_tokens
+            seen["schema"] = schema
+            return _QuizSchema(
+                title="Тема",
+                questions=[
+                    _QuestionSchema(
+                        prompt=f"Вопрос {index}",
+                        options=["1", "2", "3", "4"],
+                        correct_index=0,
+                        explanation="так",
+                    )
+                    for index in range(5)
+                ],
+            )
+
+        tutor = Tutor("test-key", "gemini-test")
+        with patch.object(tutor, "_ask", fake_ask):
+            title, drafts = await tutor.make_quiz(topic="дроби", errors=None, wanted=5)
+        self.assertEqual(title, "Тема")
+        self.assertEqual(len(drafts), 5)
+        self.assertEqual(seen["max_output_tokens"], QUIZ_OUTPUT_TOKENS)
+        self.assertIs(seen["schema"], _QuizSchema)
+
+
 class FakeTutor:
     enabled = True
 
@@ -176,9 +493,19 @@ class FakeTutor:
         self.calls += 1
         return [note_id for note_id in self.ids if any(card["id"] == note_id for card in cards)]
 
-    async def make_quiz(self, topic: str | None, errors: list[dict] | None, fallback: str | None = None, wanted: int = 6):
+    async def make_quiz(
+        self,
+        topic: str | None,
+        errors: list[dict] | None,
+        fallback: str | None = None,
+        wanted: int = 6,
+        grade: int | None = None,
+        exam_goal: str | None = None,
+    ):
         self.topic = topic
         self.errors = errors
+        self.grade = grade
+        self.exam_goal = exam_goal
         title = fallback or topic or "По моим ошибкам"
         if title and len(title) > 80:
             title = title.split("\n", 1)[0][:80]
@@ -189,7 +516,7 @@ class FakeTutor:
                 correct_index=1,
                 explanation="Четыре.",
                 skill="сложение",
-                subject="Математика",
+                subject="Алгебра",
             )
         ]
 
@@ -229,14 +556,14 @@ class DatabaseTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await search_notes(self.db, FakeTutor(), 2, "катетов"), [])
 
     async def test_delete_drops_search_hit(self) -> None:
-        note_id = await self.db.insert_note(1, "Дроби", "Математика", "Общий знаменатель.", "manual")
+        note_id = await self.db.insert_note(1, "Дроби", "Алгебра", "Общий знаменатель.", "manual")
         self.assertEqual(len(await search_notes(self.db, FakeTutor(), 1, "знаменатель")), 1)
         self.assertTrue(await self.db.delete_note(1, note_id))
         self.assertEqual(await search_notes(self.db, FakeTutor(), 1, "знаменатель"), [])
         self.assertFalse(await self.db.delete_note(2, note_id))
 
     async def test_update_note_refreshes_search(self) -> None:
-        note_id = await self.db.insert_note(1, "Дроби", "Математика", "Общий знаменатель.", "manual")
+        note_id = await self.db.insert_note(1, "Дроби", "Алгебра", "Общий знаменатель.", "manual")
         self.assertFalse(await self.db.update_note(2, note_id, "Чужое", "Физика", "нельзя"))
         original = await self.db.get_note(1, note_id)
         assert original is not None
@@ -252,8 +579,8 @@ class DatabaseTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([hit.id for hit in hits], [note_id])
 
     async def test_pinned_notes_stay_above_newer_ones(self) -> None:
-        older = await self.db.insert_note(1, "Дроби", "Математика", "Общий знаменатель.", "manual")
-        newer = await self.db.insert_note(1, "Проценты", "Математика", "Находим часть от числа.", "manual")
+        older = await self.db.insert_note(1, "Дроби", "Алгебра", "Общий знаменатель.", "manual")
+        newer = await self.db.insert_note(1, "Проценты", "Алгебра", "Находим часть от числа.", "manual")
         self.assertEqual([row["id"] for row in await self.db.list_notes(1, 0, 10)], [newer, older])
         self.assertTrue(await self.db.set_note_pinned(1, older, True))
         self.assertFalse(await self.db.set_note_pinned(2, older, True))
@@ -432,7 +759,7 @@ class DatabaseTests(unittest.IsolatedAsyncioTestCase):
         await self.db.insert_note(
             1,
             "Комбинаторика",
-            "Математика",
+            "Алгебра",
             "Число перестановок букв слова равно факториалу.",
             "chat",
         )
@@ -453,7 +780,7 @@ class DatabaseTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(health.status_code, 200)
             page = await client.get("/")
             self.assertIn("Личный кабинет", page.text)
-            self.assertIn("Откройте кабинет кнопкой в чате MAX", page.text)
+            self.assertIn("Открой кабинет кнопкой в чате MAX", page.text)
             self.assertIn("https://st.max.ru/js/max-web-app.js", page.text)
             self.assertNotIn("Боря", page.text)
             self.assertNotIn("Секрет Бори", page.text)
@@ -546,8 +873,8 @@ class DatabaseTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(await self.db.find_user(99))
 
     async def test_cabinet_delete_belongs_to_the_session(self) -> None:
-        own = await self.db.insert_note(1, "Свой конспект", "Математика", "только Аня", "manual")
-        kept = await self.db.insert_note(1, "Второй конспект", "Математика", "тоже Аня", "manual")
+        own = await self.db.insert_note(1, "Свой конспект", "Алгебра", "только Аня", "manual")
+        kept = await self.db.insert_note(1, "Второй конспект", "Алгебра", "тоже Аня", "manual")
         foreign = await self.db.insert_note(2, "Чужой конспект", "Физика", "только Боря", "manual")
         app = create_app(self.db, FakeTutor(), BOT_TOKEN)
         transport = ASGITransport(app=app)
@@ -573,7 +900,7 @@ class DatabaseTests(unittest.IsolatedAsyncioTestCase):
             self.assertIsNotNone(await self.db.get_note(1, kept))
 
     async def test_cabinet_edit_belongs_to_the_session(self) -> None:
-        own = await self.db.insert_note(1, "Свой конспект", "Математика", "только Аня", "manual")
+        own = await self.db.insert_note(1, "Свой конспект", "Алгебра", "только Аня", "manual")
         await self.db.set_note_pinned(1, own, True)
         foreign = await self.db.insert_note(2, "Чужой конспект", "Физика", "только Боря", "manual")
         app = create_app(self.db, FakeTutor(), BOT_TOKEN)
@@ -921,7 +1248,6 @@ class SkillTests(unittest.TestCase):
         faded = brightness(1.0, 1, seen, now)
         self.assertGreater(fresh, 0.9)
         self.assertLess(faded, fresh)
-        self.assertEqual(star_position(7), star_position(7))
         known = [{"id": 3, "name": "деление обеих частей"}]
         exact = _local_skill_match(normalize_name("деление обеих частей"), known)
         soft = _local_skill_match(normalize_name("деление обеих"), known)
@@ -929,10 +1255,7 @@ class SkillTests(unittest.TestCase):
         self.assertEqual(soft, (3, "деление обеих частей"))
         self.assertIsNone(_local_skill_match(normalize_name("дискриминант"), known))
 
-    def test_reminder_words(self) -> None:
-        self.assertIn("1 звезда", reminder_line(1))
-        self.assertIn("2 звезды", reminder_line(2))
-        self.assertIn("5 звёзд", reminder_line(5))
+    def test_quiet_hours(self) -> None:
         noon = datetime(2026, 10, 25, 12, tzinfo=timezone.utc)
         night = noon.replace(hour=23)
         self.assertFalse(in_quiet_hours(noon))
@@ -945,7 +1268,7 @@ class SkillTests(unittest.TestCase):
         reset()
 
 
-class SkyTests(unittest.IsolatedAsyncioTestCase):
+class NoteQuizTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()
         self.db = Database(str(Path(self._tmp.name) / "tutor.db"))
@@ -976,45 +1299,381 @@ class SkyTests(unittest.IsolatedAsyncioTestCase):
         await record(self.db, 1, "Алгебра", "деление обеих частей", True, "quiz")
         self.assertEqual(await self.db.count_errors(1), 0)
 
-    async def test_sky_and_note_quiz(self) -> None:
-        now = datetime.now(timezone.utc)
-        seen = (now - timedelta(days=10)).isoformat(timespec="seconds")
-        due = (now - timedelta(days=1)).isoformat(timespec="seconds")
-        skill_id = await self.db.insert_skill(1, "Алгебра", "линейные уравнения", 0.2, 1, seen, due)
+    async def test_note_quiz_and_removed_sky_routes(self) -> None:
         note_id = await self.db.insert_note(
             1,
             "Дроби",
-            "Математика",
+            "Алгебра",
             "Общий знаменатель важен.",
             "manual",
         )
-        payload = sky_payload(await self.db.list_skills(1), now)
-        self.assertEqual(payload["summary"]["total"], 1)
-        self.assertEqual(payload["summary"]["dim"], 1)
-        self.assertEqual(payload["constellations"][0]["stars"][0]["id"], skill_id)
         tutor = FakeTutor()
         app = create_app(self.db, tutor, BOT_TOKEN)
         transport = ASGITransport(app=app)
         async with AsyncClient(transport=transport, base_url="https://cabinet") as client:
-            self.assertEqual((await client.get("/api/sky")).status_code, 401)
+            self.assertEqual((await client.get("/api/sky")).status_code, 404)
             await client.post("/api/session", json={"init_data": _init_data(1, "Аня")})
-            sky = await client.get("/api/sky")
-            self.assertEqual(sky.status_code, 200)
-            self.assertEqual(sky.json()["summary"]["dim"], 1)
-            detail = await client.get(f"/api/skills/{skill_id}")
-            self.assertEqual(detail.status_code, 200)
-            self.assertEqual(detail.json()["name"], "линейные уравнения")
-            self.assertEqual((await client.get("/api/skills/999")).status_code, 404)
-            review = await client.post("/api/quizzes/review", json={})
-            self.assertEqual(review.status_code, 200)
-            self.assertEqual(review.json()["skill_ids"], [skill_id])
-            self.assertNotIn("correct_index", review.text)
+            self.assertEqual((await client.get("/api/sky")).status_code, 404)
+            self.assertEqual((await client.get("/api/skills/1")).status_code, 404)
+            self.assertEqual((await client.post("/api/quizzes/review", json={})).status_code, 404)
             started = await client.post(f"/api/quizzes/note/{note_id}")
             self.assertEqual(started.status_code, 200)
             self.assertEqual(started.json()["title"], "Дроби")
             self.assertIn("Общий знаменатель", tutor.topic)
             foreign = await self.db.insert_note(2, "Чужое", "Физика", "скрыто", "chat")
             self.assertEqual((await client.post(f"/api/quizzes/note/{foreign}")).status_code, 404)
+            profile = await client.patch(
+                "/api/profile",
+                json={
+                    "first_name": "Аня",
+                    "grade": 8,
+                    "exam_goal": "self",
+                    "explain_style": "short",
+                },
+            )
+            self.assertEqual(profile.status_code, 200)
+            self.assertTrue(profile.json()["reminders"])
+            muted = await client.patch(
+                "/api/profile",
+                json={"first_name": "Аня", "grade": 8, "reminders": False},
+            )
+            self.assertEqual(muted.status_code, 200)
+            self.assertFalse(muted.json()["reminders"])
+            self.assertFalse((await client.get("/api/profile")).json()["reminders"])
+            broken = await client.patch(
+                "/api/profile",
+                json={"first_name": "Аня", "grade": 8, "reminders": "нет"},
+            )
+            self.assertEqual(broken.status_code, 400)
+
+    async def test_wrong_quiz_answer_goes_to_error_bank(self) -> None:
+        quiz_id = await self.db.create_quiz(
+            1,
+            "Производная",
+            "topic",
+            [
+                {
+                    "prompt": "Чему равна производная x²?",
+                    "options": ["x", "2x", "2", "x²"],
+                    "correct_index": 1,
+                    "explanation": "Степень умножается и уменьшается на 1.",
+                    "skill": "производная степени",
+                    "subject": "Алгебра",
+                }
+            ],
+        )
+        question = await self.db.next_pending(quiz_id)
+        assert question is not None
+        wrong = await answer_question(self.db, 1, question["id"], 0)
+        self.assertFalse(wrong.correct)
+        errors = await self.db.list_errors(1)
+        self.assertEqual(len(errors), 1)
+        self.assertEqual(errors[0]["source"], "quiz")
+        self.assertEqual(errors[0]["mistake"], "производная степени")
+        again = await answer_question(self.db, 1, question["id"], 0)
+        self.assertFalse(again.correct)
+        self.assertEqual(len(await self.db.list_errors(1)), 1)
+        self.assertEqual(await self.db.list_errors(2), [])
+        app = create_app(self.db, FakeTutor(), BOT_TOKEN)
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="https://cabinet") as client:
+            await client.post("/api/session", json={"init_data": _init_data(1, "Аня")})
+            bank = await client.get("/api/errors")
+            self.assertEqual(bank.status_code, 200)
+            self.assertEqual(bank.json()["items"][0]["source"], "quiz")
+
+    async def test_error_quiz_does_not_spawn_new_bank_rows(self) -> None:
+        await self.db.insert_error(1, "Алгебра", "2x=4", "деление", "раздели обе части")
+        quiz_id = await self.db.create_quiz(
+            1,
+            "По ошибкам",
+            "errors",
+            [
+                {
+                    "prompt": "2x = 4",
+                    "options": ["1", "2", "3", "4"],
+                    "correct_index": 1,
+                    "explanation": "Раздели обе части на 2.",
+                    "skill": "деление",
+                    "subject": "Алгебра",
+                }
+            ],
+        )
+        question = await self.db.next_pending(quiz_id)
+        assert question is not None
+        before = await self.db.count_errors(1)
+        wrong = await answer_question(self.db, 1, question["id"], 0)
+        self.assertFalse(wrong.correct)
+        self.assertEqual(await self.db.count_errors(1), before)
+
+    async def test_old_errors_table_gains_source_columns(self) -> None:
+        path = Path(self._tmp.name) / "legacy.db"
+        import aiosqlite
+
+        async with aiosqlite.connect(path) as conn:
+            await conn.execute(
+                """
+                CREATE TABLE errors (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER NOT NULL,
+                    subject TEXT NOT NULL DEFAULT '',
+                    problem TEXT NOT NULL,
+                    mistake TEXT NOT NULL,
+                    explanation TEXT NOT NULL,
+                    skill_id INTEGER,
+                    resolved_at TEXT,
+                    created_at TEXT NOT NULL
+                )
+                """
+            )
+            await conn.execute(
+                """
+                CREATE TABLE users (
+                    user_id INTEGER PRIMARY KEY,
+                    first_name TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL
+                )
+                """
+            )
+            await conn.commit()
+        legacy = Database(str(path))
+        await legacy.connect()
+        await legacy.upsert_user(1, "Аня")
+        error_id = await legacy.insert_error(
+            1, "Алгебра", "задача", "ошибка", "подсказка", source="quiz", question_id=7
+        )
+        self.assertTrue(await legacy.has_error_for_question(1, 7))
+        rows = await legacy.list_error_bank(1)
+        self.assertEqual(rows[0]["id"], error_id)
+        self.assertEqual(rows[0]["source"], "quiz")
+        await legacy.close()
+
+
+class SubjectTests(unittest.TestCase):
+    def test_synonyms_collapse_to_one_subject(self) -> None:
+        self.assertEqual(normalize_subject("Алгебра"), "Алгебра")
+        self.assertEqual(normalize_subject("  математика 8 класс "), "Алгебра")
+        self.assertEqual(normalize_subject("Геометрия"), "Геометрия")
+        self.assertEqual(normalize_subject("русский"), "Русский язык")
+        self.assertEqual(normalize_subject("Английский язык"), "Английский")
+        self.assertEqual(normalize_subject("русская литература"), "Литература")
+        self.assertEqual(normalize_subject(""), "Другое")
+        self.assertEqual(normalize_subject("Свой конспект"), "Другое")
+        self.assertEqual(normalize_subject("Школьный предмет"), "Другое")
+        self.assertEqual(normalize_subject("астрономия"), "Астрономия")
+
+    def test_manual_title_cuts_by_word(self) -> None:
+        self.assertEqual(manual_title("Закон Ома\nU = IR"), "Закон Ома")
+        long_line = "Квадратные уравнения решаются через дискриминант " * 4
+        title = manual_title(long_line)
+        self.assertLessEqual(len(title), 80)
+        self.assertTrue(title.endswith("…"))
+        self.assertTrue(long_line.startswith(title[:-1]))
+        self.assertEqual(manual_title("   \n  "), "Свой конспект")
+
+    def test_tutor_reply_is_clipped_and_normalized(self) -> None:
+        reply = Tutor("", "gemini-test")._to_reply(
+            _TutorSchema(
+                subject="алгебра",
+                title="т" * 200,
+                reply="а" * 2000,
+                full_solution="б" * 2000,
+                skill="с" * 200,
+            )
+        )
+        self.assertEqual(reply.subject, "Алгебра")
+        self.assertLessEqual(len(reply.reply), 1200)
+        self.assertLessEqual(len(reply.full_solution), 1500)
+        self.assertEqual(len(reply.title), 80)
+        self.assertEqual(len(reply.skill), 80)
+
+    def test_reminder_text_counts_open_errors(self) -> None:
+        self.assertIsNone(reminder_text(0))
+        self.assertIn("1 незакреплённая ошибка", reminder_text(1) or "")
+        self.assertIn("3 незакреплённые ошибки", reminder_text(3) or "")
+        self.assertIn("12 незакреплённых ошибок", reminder_text(12) or "")
+
+
+class PlanFeatureTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self) -> None:
+        reset()
+        self._tmp = tempfile.TemporaryDirectory()
+        self.path = str(Path(self._tmp.name) / "tutor.db")
+        self.db = Database(self.path)
+        await self.db.connect()
+        await self.db.upsert_user(1, "Аня")
+        await self.db.upsert_user(2, "Боря")
+
+    async def asyncTearDown(self) -> None:
+        reset()
+        await self.db.close()
+        self._tmp.cleanup()
+
+    @asynccontextmanager
+    async def _client(self, tutor=None, **kwargs) -> AsyncIterator[AsyncClient]:
+        app = create_app(self.db, tutor or FakeTutor(), BOT_TOKEN, **kwargs)
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="https://cabinet") as client:
+            await client.post("/api/session", json={"init_data": _init_data(1, "Аня")})
+            yield client
+
+    async def test_old_subjects_are_normalized_on_connect(self) -> None:
+        note_id = await self.db.insert_note(1, "Дроби", "Алгебра", "Общий знаменатель.", "manual")
+        await self.db.insert_error(1, "алгебра", "2x=4", "деление", "раздели")
+        own = await self.db.insert_note(1, "Своё", "Свой конспект", "текст", "manual")
+        await self.db.close()
+        self.db = Database(self.path)
+        await self.db.connect()
+        self.assertEqual((await self.db.get_note(1, note_id))["subject"], "Алгебра")
+        self.assertEqual((await self.db.get_note(1, own))["subject"], "Другое")
+        self.assertEqual((await self.db.list_error_bank(1))[0]["subject"], "Алгебра")
+        hits = await search_notes(self.db, FakeTutor(), 1, "знаменатель")
+        self.assertEqual(hits[0].subject, "Алгебра")
+
+    async def test_manual_note_keeps_subject_and_title(self) -> None:
+        plain = await save_manual(self.db, 1, "Закон Ома\nU = IR")
+        stored = await self.db.get_note(1, plain)
+        self.assertEqual(stored["subject"], "Другое")
+        self.assertEqual(stored["title"], "Закон Ома")
+        async with self._client() as client:
+            created = await client.post(
+                "/api/notes",
+                json={"text": "Сила тока равна U/R.", "title": "Закон Ома", "subject": "физика"},
+            )
+            self.assertEqual(created.status_code, 200)
+            self.assertEqual(created.json()["subject"], "Физика")
+            self.assertEqual(created.json()["title"], "Закон Ома")
+            fallback = await client.post("/api/notes", json={"text": "Первая строка\nтекст"})
+            self.assertEqual(fallback.json()["title"], "Первая строка")
+            self.assertEqual(fallback.json()["subject"], "Другое")
+            broken = await client.post("/api/notes", json={"text": "текст", "subject": 5})
+            self.assertEqual(broken.status_code, 400)
+            detail = await client.get(f"/api/notes/{created.json()['id']}")
+            self.assertEqual(detail.json()["source"], "manual")
+            self.assertFalse(detail.json()["pinned"])
+
+    async def test_semantic_search_spends_the_limit(self) -> None:
+        note_id = await self.db.insert_note(1, "Дроби", "Алгебра", "Общий знаменатель.", "manual")
+        tutor = FakeTutor([note_id])
+        async with self._client(tutor) as client:
+            while allow(1):
+                pass
+            exact = await client.get("/api/search", params={"q": "знаменатель"})
+            self.assertEqual(exact.status_code, 200)
+            self.assertEqual(len(exact.json()), 1)
+            limited = await client.get("/api/search", params={"q": "как складывать части"})
+            self.assertEqual(limited.status_code, 429)
+            self.assertIn("через час", limited.json()["detail"])
+            self.assertEqual(tutor.calls, 0)
+
+    async def test_quiz_uses_grade_and_goal(self) -> None:
+        await self.db.set_profile(1, "Аня", 9, exam_goal="oge")
+        tutor = FakeTutor()
+        await start_topic_quiz(self.db, tutor, 1, "дроби")
+        self.assertEqual(tutor.grade, 9)
+        self.assertEqual(tutor.exam_goal, "oge")
+        await self.db.insert_error(1, "Алгебра", "2x=4", "деление", "раздели")
+        await start_error_quiz(self.db, tutor, 1)
+        self.assertEqual(tutor.grade, 9)
+
+    async def test_quiz_answer_reports_asked_and_retry(self) -> None:
+        async with self._client() as client:
+            started = (await client.post("/api/quizzes/topic", json={"topic": "дроби"})).json()
+            self.assertEqual(started["asked"], 0)
+            self.assertFalse(started["question"]["retry"])
+            wrong = (
+                await client.post(
+                    "/api/quizzes/answer",
+                    json={"question_id": started["question"]["id"], "option": 0},
+                )
+            ).json()
+            self.assertEqual(wrong["asked"], 1)
+            self.assertEqual(wrong["done"], 0)
+            self.assertTrue(wrong["question"]["retry"])
+
+    async def test_error_bank_progress_in_one_query(self) -> None:
+        skill_id = await self.db.insert_skill(1, "Алгебра", "деление", 0.4, 2, utcnow(), utcnow())
+        for correct in (True, False, True, True):
+            await self.db.insert_skill_event(skill_id, "quiz", correct)
+        await self.db.insert_error(1, "Алгебра", "2x=4", "не разделил", "СКРЫТЫЙ РАЗБОР", skill_id)
+        await self.db.insert_error(1, "Физика", "U=IR", "перепутал", "разбор")
+        foreign = await self.db.insert_skill(2, "Алгебра", "чужой", 0.4, 2, utcnow(), utcnow())
+        await self.db.insert_error(2, "Алгебра", "чужое", "чужое", "чужое", foreign)
+        async with self._client() as client:
+            data = (await client.get("/api/errors")).json()
+        rows = {row["problem"]: row for row in data["items"]}
+        self.assertEqual(set(rows), {"2x=4", "U=IR"})
+        self.assertEqual(rows["2x=4"]["progress"], 2)
+        self.assertEqual(rows["2x=4"]["status"], "active")
+        self.assertEqual(rows["2x=4"]["skill"], "деление")
+        self.assertEqual(rows["U=IR"]["status"], "new")
+        self.assertEqual(data["counts"], {"new": 1, "active": 1, "closed": 0})
+        self.assertNotIn("СКРЫТЫЙ РАЗБОР", json.dumps(data, ensure_ascii=False))
+
+    async def test_reminders_only_for_open_errors_once_a_day(self) -> None:
+        await self.db.set_chat(1, 100)
+        await self.db.set_chat(2, 200)
+        await self.db.insert_error(1, "Алгебра", "2x=4", "деление", "раздели")
+        resolved = await self.db.insert_error(2, "Физика", "U=IR", "формула", "разбор")
+        await self.db.conn.execute("UPDATE errors SET resolved_at = ? WHERE id = ?", (utcnow(), resolved))
+        await self.db.conn.commit()
+        due = await self.db.users_to_remind("2026-11-04")
+        self.assertEqual([(row["user_id"], row["open_errors"]) for row in due], [(1, 1)])
+        await self.db.mark_reminded(1, "2026-11-04")
+        self.assertEqual(await self.db.users_to_remind("2026-11-04"), [])
+        self.assertEqual(len(await self.db.users_to_remind("2026-11-05")), 1)
+        await self.db.set_reminders(1, False)
+        self.assertEqual(await self.db.users_to_remind("2026-11-05"), [])
+        quiet = datetime(2026, 11, 4, 22, 30, tzinfo=MOSCOW)
+        self.assertTrue(in_quiet_hours(quiet))
+        self.assertFalse(in_quiet_hours(quiet.replace(hour=12)))
+
+    async def test_streak_counts_checks_and_notes_and_goal_is_configurable(self) -> None:
+        today = datetime.now(MOSCOW).date()
+        yesterday = datetime.combine(today - timedelta(days=1), datetime.min.time(), MOSCOW).replace(hour=15)
+        await self.db.insert_note(1, "Дроби", "Алгебра", "текст", "manual")
+        await self.db.insert_check(1, {"subject": "Алгебра", "is_correct": True})
+        await self.db.conn.execute(
+            "UPDATE checks SET created_at = ? WHERE user_id = 1",
+            (yesterday.astimezone(timezone.utc).isoformat(timespec="seconds"),),
+        )
+        await self.db.conn.commit()
+        stats = await self.db.home_stats(1, today, 7)
+        self.assertEqual(stats["streak_days"], 2)
+        self.assertEqual(stats["week_goal"], 7)
+        self.assertEqual((await self.db.home_stats(2, today))["streak_days"], 0)
+        async with self._client(week_goal=7) as client:
+            self.assertEqual((await client.get("/api/home")).json()["week_goal"], 7)
+
+
+class RenderCleanupTests(unittest.TestCase):
+    def test_render_has_no_star_lines(self) -> None:
+        result = CheckResult(
+            is_schoolwork=True,
+            subject="Алгебра",
+            problem_text="2x=4",
+            student_solution_text="x=4",
+            is_correct=False,
+            error_step="деление",
+            hint="Раздели обе части.",
+            full_explanation="x=2",
+            skill="деление обеих частей",
+            praise="",
+        )
+        self.assertNotIn("Звезда", render_check(result))
+        view = AnswerView(
+            correct=False,
+            already_closed=False,
+            closed_quiz=False,
+            missing=False,
+            explanation="Смотри на степень.",
+            finished=False,
+            done=0,
+            total=1,
+            elapsed="1 сек",
+            quiz_title="Производная",
+            next_question=None,
+        )
+        self.assertNotIn("Звезда", render_feedback(view))
 
 
 class WebAppTests(unittest.TestCase):

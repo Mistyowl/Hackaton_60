@@ -2,6 +2,7 @@ import time
 
 LIMIT = 30
 WINDOW_SECONDS = 3600
+LIMIT_MESSAGE = "Слишком много запросов. Попробуй через час."
 _hits: dict[int, list[float]] = {}
 
 

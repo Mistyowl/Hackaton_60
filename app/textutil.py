@@ -105,6 +105,38 @@ def _is_formula(line: str) -> bool:
     return len(_CYRILLIC_WORD.findall(stripped)) <= 1
 
 
+OTHER_SUBJECT = "Другое"
+_SUBJECT_STEMS = (
+    ("геометр", "Геометрия"),
+    ("алгебр", "Алгебра"),
+    ("математ", "Алгебра"),
+    ("арифмет", "Алгебра"),
+    ("физик", "Физика"),
+    ("литерат", "Литература"),
+    ("русск", "Русский язык"),
+    ("хими", "Химия"),
+    ("англ", "Английский"),
+    ("english", "Английский"),
+    ("биолог", "Биология"),
+    ("истор", "История"),
+    ("обществ", "Обществознание"),
+    ("информат", "Информатика"),
+    ("географ", "География"),
+)
+_NO_SUBJECT = {"", "-", "—", "другое", "свой конспект", "школьный предмет", "без предмета", "предмет"}
+
+
+def normalize_subject(value: str | None) -> str:
+    clean = " ".join((value or "").split())
+    lowered = clean.lower()
+    if lowered in _NO_SUBJECT:
+        return OTHER_SUBJECT
+    for stem, name in _SUBJECT_STEMS:
+        if stem in lowered:
+            return name
+    return (clean[:1].upper() + clean[1:])[:80]
+
+
 def clip(value: str, limit: int = MESSAGE_LIMIT) -> str:
     if len(value) <= limit:
         return value
@@ -198,6 +230,46 @@ def image_mime(data: bytes) -> str:
     if data[4:8] == b"ftyp":
         return "image/heic"
     return "image/jpeg"
+
+
+_AUDIO_EXT_MIME = {
+    ".ogg": "audio/ogg",
+    ".opus": "audio/ogg",
+    ".mp3": "audio/mpeg",
+    ".mpga": "audio/mpeg",
+    ".mpeg": "audio/mpeg",
+    ".mp4": "audio/mp4",
+    ".m4a": "audio/mp4",
+    ".aac": "audio/aac",
+    ".wav": "audio/wav",
+    ".webm": "audio/webm",
+    ".flac": "audio/flac",
+}
+
+
+def audio_filename_ok(name: str) -> bool:
+    lowered = (name or "").strip().lower()
+    return any(lowered.endswith(ext) for ext in _AUDIO_EXT_MIME)
+
+
+def audio_mime(data: bytes, filename: str = "") -> str:
+    if data.startswith(b"OggS"):
+        return "audio/ogg"
+    if data.startswith(b"ID3") or data[:2] in (b"\xff\xfb", b"\xff\xf3", b"\xff\xf2"):
+        return "audio/mpeg"
+    if data.startswith(b"RIFF") and data[8:12] == b"WAVE":
+        return "audio/wav"
+    if data.startswith(b"fLaC"):
+        return "audio/flac"
+    if len(data) > 8 and data[4:8] == b"ftyp":
+        brand = data[8:12]
+        if brand in (b"M4A ", b"M4B ", b"mp4a", b"isom", b"mp42", b"MSNV"):
+            return "audio/mp4"
+    lowered = (filename or "").strip().lower()
+    for ext, mime in _AUDIO_EXT_MIME.items():
+        if lowered.endswith(ext):
+            return mime
+    return "audio/ogg"
 
 
 def check_prefix(text: str) -> str | None:

@@ -3,45 +3,26 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
   <title>Личный кабинет</title>
   <link rel="stylesheet" href="/static/cabinet.css">
 </head>
 <body>
   <main>
-    <p id="gate" class="gate">Откройте кабинет кнопкой в чате MAX.</p>
+    <div id="gate" class="gate">
+      <img class="gate-mascot" src="/static/lumi-think.png" alt="">
+      <h1 class="gate-title" id="gate-title">Кабинет открывается из чата</h1>
+      <p id="gate-text">Открой кабинет кнопкой в чате MAX.</p>
+      <p class="gate-hint">В чате с Люми нажми кнопку «Кабинет» в меню — он откроется сам.</p>
+    </div>
     <div id="cabinet" hidden>
-      <section data-screen="sky">
-        <div class="sky-screen">
-          <header class="top">
-            <div>
-              <div class="kicker">Карта знаний</div>
-              <h1 class="home-title">Созвездие</h1>
-            </div>
-            <img class="mascot" src="/assets/lumi-mark.png" alt="">
-          </header>
-          <p class="sub" id="sky-summary">Каждый навык — звезда. Тусклая значит, что тему пора повторить.</p>
-          <div class="sky-legend">
-            <span><i class="legend-dot bright"></i> горит</span>
-            <span><i class="legend-dot dim"></i> пора повторить</span>
-          </div>
-          <div id="sky-empty" class="empty-card" hidden>
-            <img class="mascot" src="/static/lumi-think.svg" alt="">
-            <p>Пришли первую задачу, и зажжётся первая звезда.</p>
-          </div>
-          <div class="sky-canvas" id="sky-canvas"></div>
-          <button type="button" class="primary" id="ignite" hidden>Зажечь тусклые звёзды</button>
-          <button type="button" class="ghost" id="share-sky">Поделиться небом</button>
-          <p class="status" id="sky-status"></p>
-        </div>
-      </section>
-
-      <section data-screen="home" class="home" hidden>
+      <section data-screen="home" class="home tab-screen" hidden>
         <div class="hello">
           <img class="hello-mark" src="/assets/lumi-mark.png" alt="">
           <div class="hello-copy">
-            <div class="hello-hi">Привет,</div>
             <div class="hello-name-row">
-              <span class="hello-name" id="home-name">Ученик</span><span>!</span>
+              <span class="hello-hi">Привет,</span>
+              <span class="hello-name"><span id="home-name">Ученик</span>!</span>
               <img class="hello-spark" src="/static/icon-stars.png" alt="" width="22" height="22">
             </div>
             <div class="hello-chips">
@@ -92,20 +73,19 @@
         <div id="home-notes"></div>
       </section>
 
-      <section data-screen="notes" hidden>
-        <div class="screen-head">
-          <button type="button" class="back" data-back="home" aria-label="Назад"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M15 18l-6-6 6-6"/></svg></button>
-          <h1>Конспекты</h1>
+      <section data-screen="notes" class="tab-screen" hidden>
+        <div class="screen-head notes-head">
+          <h1 class="home-title">Конспекты</h1>
           <div class="notes-head-actions">
             <button type="button" class="notes-new" id="notes-new">+ Новый</button>
           </div>
         </div>
         <label class="control search">
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3-3"/></svg>
-          <input id="search-input" placeholder="Поиск по конспектам" autocomplete="off">
+          <input id="search-input" type="search" placeholder="Поиск по конспектам" autocomplete="off">
         </label>
         <div class="filter-row" id="notes-filters"></div>
-        <div id="search-hits"></div>
+        <div id="search-hits" class="search-hits" hidden></div>
         <div id="notes-list"></div>
       </section>
 
@@ -115,6 +95,14 @@
           <h1 id="note-title">Конспект</h1>
         </div>
         <p class="sub" id="note-meta"></p>
+        <div class="note-actions" id="note-actions">
+          <button type="button" class="note-action primary-soft" id="note-quiz">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" aria-hidden="true"><path d="M13 2 4 14h7l-1 8 10-14h-7l0-6z"/></svg>
+            Квиз по конспекту
+          </button>
+          <button type="button" class="note-action" id="note-pin">Закрепить</button>
+          <button type="button" class="note-action danger-soft" id="note-delete">Удалить</button>
+        </div>
         <div class="note-panel">
           <div class="note-panel-head">
             <span class="eyebrow">Текст</span>
@@ -124,6 +112,12 @@
           </div>
           <div class="note-body" id="note-body"></div>
           <form id="note-form" hidden>
+            <label class="field">Заголовок
+              <span class="control"><input id="note-title-input" maxlength="120" autocomplete="off"></span>
+            </label>
+            <div class="field">Предмет
+              <div class="filter-row wrap" id="note-subject-picks"></div>
+            </div>
             <textarea id="note-body-input" maxlength="20000" aria-label="Текст конспекта"></textarea>
             <div class="form-actions">
               <button type="button" id="cancel-note">Отмена</button>
@@ -139,15 +133,20 @@
           <button type="button" class="back" data-back="notes" aria-label="Назад"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M15 18l-6-6 6-6"/></svg></button>
           <h1>Новый конспект</h1>
         </div>
-        <p class="sub">Первая строка станет заголовком.</p>
         <form id="new-note-form">
-          <textarea id="new-note-input" maxlength="20000" placeholder="Название и текст конспекта" aria-label="Текст конспекта"></textarea>
+          <label class="field">Заголовок
+            <span class="control"><input id="new-note-title" maxlength="120" placeholder="Если пусто — возьму первую строку" autocomplete="off"></span>
+          </label>
+          <div class="field">Предмет
+            <div class="filter-row wrap" id="new-note-subject"></div>
+          </div>
+          <textarea id="new-note-input" maxlength="20000" placeholder="Текст конспекта" aria-label="Текст конспекта"></textarea>
           <button type="submit" class="primary" id="save-new-note">Сохранить</button>
           <p class="status" id="new-note-status"></p>
         </form>
       </section>
 
-      <section data-screen="profile" hidden>
+      <section data-screen="profile" class="tab-screen" hidden>
         <div class="summary">
           <img class="mascot" src="/assets/lumi-mark.png" alt="">
           <div>
@@ -156,8 +155,8 @@
           </div>
         </div>
         <div class="profile-stats">
-          <article class="profile-stat"><strong id="stat-quizzes">0</strong><span>квизов</span></article>
-          <article class="profile-stat"><strong id="stat-closed">0</strong><span>ошибок закрыто</span></article>
+          <article class="profile-stat"><strong id="stat-quizzes">0</strong><span id="stat-quizzes-label">квизов</span></article>
+          <article class="profile-stat"><strong id="stat-closed">0</strong><span id="stat-closed-label">ошибок закрыто</span></article>
           <article class="profile-stat"><strong id="stat-accuracy">0%</strong><span>точность</span></article>
         </div>
         <form id="profile-form">
@@ -185,16 +184,25 @@
             </div>
           </div>
           <div class="field">Стиль объяснений Люми
-            <div class="style-slider-wrap">
-              <div class="style-slider-labels"><span>Короче</span><span>Подробнее</span></div>
-              <input class="style-slider" id="style-slider" type="range" min="0" max="1" step="1" value="0" aria-label="Стиль объяснений">
+            <input id="style-input" type="hidden" name="explain_style" value="short">
+            <div class="style-wrap">
+              <div class="style-row" id="style-row" role="radiogroup" aria-label="Стиль объяснений">
+                <button type="button" class="style-chip on" data-style="short" aria-pressed="true">Короче</button>
+                <button type="button" class="style-chip" data-style="detail" aria-pressed="false">Подробнее</button>
+              </div>
               <div class="style-preview">
                 <img src="/assets/lumi-mark.png" alt="">
                 <p id="style-preview-text">Объясню понятно, без лишнего.</p>
               </div>
             </div>
           </div>
-          <label class="check"><input type="checkbox" id="reminders-input"> Напоминать про тусклые звёзды</label>
+          <label class="toggle-row">
+            <span class="toggle-copy">
+              <strong>Напоминать про ошибки</strong>
+              <span>Раз в день, не раньше 9:00 и не позже 21:00, если в банке есть незакреплённые ошибки.</span>
+            </span>
+            <input type="checkbox" id="reminders-input" class="toggle">
+          </label>
           <button type="submit" class="primary" id="save-profile">Сохранить</button>
           <p class="status" id="save-status"></p>
         </form>
@@ -202,7 +210,7 @@
         <div class="achievements" id="achievements"></div>
       </section>
 
-      <section data-screen="quiz" class="quiz-home" hidden>
+      <section data-screen="quiz" class="quiz-home tab-screen" hidden>
         <header class="top"><h1 class="home-title">Квизы</h1></header>
         <button type="button" class="error-banner" id="quiz-error-card">
           <span class="error-banner-icon" aria-hidden="true"><img src="/static/icon-errors.png" alt="" width="28" height="28"></span>
@@ -215,14 +223,18 @@
         <h2>Квиз по теме</h2>
         <div class="subject-grid" id="subject-grid">
           <button type="button" class="subject on" data-subject="algebra"><span class="subject-mark"><img src="/static/subject-algebra.png" alt=""></span>Алгебра</button>
-          <button type="button" class="subject" data-subject="geometry"><span class="subject-mark"><svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 4l8 16H4L12 4z"/></svg></span>Геометрия</button>
-          <button type="button" class="subject" data-subject="physics"><span class="subject-mark"><img src="/static/subject-physics.png" alt=""></span>Физика</button>
+          <button type="button" class="subject" data-subject="geometry"><span class="subject-mark"><img src="/static/subject-geometry.svg" alt=""></span>Геометрия</button>
+          <button type="button" class="subject" data-subject="physics"><span class="subject-mark"><img src="/static/subject-physics.svg" alt=""></span>Физика</button>
           <button type="button" class="subject" data-subject="russian"><span class="subject-mark"><img src="/static/subject-russian.png" alt=""></span>Русский</button>
           <button type="button" class="subject" data-subject="chemistry"><span class="subject-mark"><img src="/static/subject-chemistry.png" alt=""></span>Химия</button>
           <button type="button" class="subject" data-subject="english"><span class="subject-mark"><img src="/static/subject-english.png" alt=""></span>Английский</button>
         </div>
         <div class="quiz-label">Тема</div>
         <div class="chip-row" id="topic-chips"></div>
+        <p class="topic-hint" id="topic-hint" hidden>Конспектов по этому предмету пока нет — Люми соберёт квиз по программе твоего класса.</p>
+        <label class="control custom-topic" id="custom-topic-wrap" hidden>
+          <input id="custom-topic" maxlength="120" placeholder="Например: квадратные уравнения" autocomplete="off" aria-label="Своя тема квиза">
+        </label>
         <div class="quiz-label">Вопросов</div>
         <div class="chip-row" id="count-chips">
           <button type="button" class="pick on" data-count="5">5</button>
@@ -243,7 +255,7 @@
         <p class="status" id="topic-status"></p>
       </section>
 
-      <section data-screen="quiz-errors" hidden>
+      <section data-screen="quiz-errors" class="tab-screen" hidden>
         <div class="top bank-head">
           <h1 class="home-title">Банк ошибок</h1>
           <button type="button" class="bank-train" id="start-errors" disabled>
@@ -257,16 +269,18 @@
           <article class="bank-count closed"><strong id="bank-closed">0</strong><span>Закреплены</span></article>
         </div>
         <div class="filter-row" id="error-filters"></div>
-        <p class="bank-hint">Ошибка закрепляется после 3 верных подряд. Повторы — по мере тусклых звёзд.</p>
+        <p class="bank-hint">Ошибка закрепляется после 3 верных ответов подряд в квизах.</p>
         <div id="error-list"></div>
         <p class="status" id="error-status"></p>
       </section>
 
       <section data-screen="quiz-loading" hidden>
-        <div class="prompt">
+        <div class="prompt loading-card">
           <img class="mascot pulse" src="/assets/lumi-mark.png" alt="">
-          <p>Собираю квиз</p>
+          <p class="loading-title">Собираю квиз</p>
+          <p class="loading-tip" id="loading-tip">Обычно это занимает до минуты — не закрывай экран.</p>
         </div>
+        <button type="button" class="ghost" id="quiz-cancel">Отменить</button>
       </section>
 
       <section data-screen="quiz-play" hidden>
@@ -296,6 +310,7 @@
             <img class="result-mark" id="result-mascot" src="/assets/lumi-mark.png" alt="">
             <div class="result-score" id="result-score">0/0</div>
             <p class="result-note" id="result-title">Квиз пройден</p>
+            <p class="result-time" id="result-time" hidden></p>
           </div>
           <div class="result-topics">
             <article class="topic-card">
@@ -313,7 +328,7 @@
               <p class="coach-text" id="result-advice"></p>
             </div>
           </div>
-          <button type="button" class="primary" id="quiz-again">Повторить</button>
+          <button type="button" class="primary" id="quiz-again">Новый квиз</button>
           <button type="button" class="warn" id="quiz-retry" hidden>Разобрать ошибки</button>
           <button type="button" class="ghost" id="quiz-chat">В чат</button>
         </div>
@@ -354,16 +369,7 @@
       </div>
     </div>
   </div>
-  <div id="star-sheet" class="sheet" hidden>
-    <div class="sheet-card">
-      <h2 id="star-name">Звезда</h2>
-      <p id="star-meta"></p>
-      <div id="star-notes"></div>
-      <button type="button" class="primary" id="star-train">Зажечь (3 вопроса)</button>
-      <button type="button" class="ghost" id="star-note" hidden>Открыть конспект</button>
-      <button type="button" class="ghost" id="star-close">Закрыть</button>
-    </div>
-  </div>
+  <div id="toast" class="toast" role="status" hidden></div>
   <script src="https://st.max.ru/js/max-web-app.js"></script>
   <script src="/static/cabinet.js"></script>
 </body>

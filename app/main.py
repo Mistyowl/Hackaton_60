@@ -4,42 +4,38 @@ import logging
 import uvicorn
 from maxapi import Bot, Dispatcher
 from maxapi.enums.parse_mode import ParseMode
+from maxapi.enums.update import UpdateType
+from maxapi.webhook.fastapi import FastAPIMaxWebhook
 
 from app.bot.commands import bot_commands
 from app.bot.handlers import BotApp
-from app.bot.keyboards import cabinet_keyboard
-from app.services.reminders import due_reminder, in_quiet_hours, moscow_now
-from app.config import get_settings
+from app.bot.keyboards import reminder_keyboard
+from app.config import get_settings, webhook_path
 from app.db import Database
+from app.services.reminders import in_quiet_hours, moscow_now, reminder_text
 from app.services.tutor import Tutor
+from app.textutil import esc
 from app.web import create_app
 
 log = logging.getLogger(__name__)
+REMIND_EVERY_SECONDS = 1800
+WEBHOOK_UPDATES = [
+    UpdateType.BOT_STARTED,
+    UpdateType.MESSAGE_CREATED,
+    UpdateType.MESSAGE_CALLBACK,
+]
 
 
-async def run_bot(
-    token: str,
-    db: Database,
-    tutor: Tutor,
-    cabinet_url: str,
-    allowed_user_ids: set[int],
-) -> None:
-    bot = Bot(token=token, parse_mode=ParseMode.HTML)
-    dispatcher = Dispatcher()
-    web_app = ""
+async def _bot_username(bot: Bot) -> str:
     try:
         me = await bot.get_me()
-        web_app = getattr(me, "username", "") or ""
+        return getattr(me, "username", "") or ""
     except Exception:
         log.warning("Не удалось узнать имя бота для кнопки кабинета.", exc_info=True)
-    BotApp(bot, db, tutor, cabinet_url, web_app, allowed_user_ids).register(dispatcher)
-    try:
-        await bot.delete_webhook()
-    except Exception:
-        log.warning(
-            "Не удалось снять webhook. Если polling молчит, удалите подписку в кабинете MAX.",
-            exc_info=True,
-        )
+        return ""
+
+
+async def _publish_commands(bot: Bot, cabinet_url: str) -> None:
     try:
         await bot.set_commands(*bot_commands(bool(cabinet_url.strip())))
     except Exception:
@@ -47,36 +43,101 @@ async def run_bot(
             "Не удалось опубликовать меню команд. Останется список с прошлого запуска.",
             exc_info=True,
         )
-    log.info("Бот слушает MAX через long polling")
-    reminders = asyncio.create_task(_remind_loop(bot, db, cabinet_url, web_app))
+
+
+async def run_bot_polling(
+    bot: Bot,
+    dispatcher: Dispatcher,
+    db: Database,
+    cabinet_url: str,
+    web_app: str,
+) -> None:
+    try:
+        await bot.delete_webhook()
+    except Exception:
+        log.warning(
+            "Не удалось снять webhook. Если polling молчит, удалите подписку в кабинете MAX.",
+            exc_info=True,
+        )
+    await _publish_commands(bot, cabinet_url)
+    log.info(
+        "Бот слушает MAX через long polling. "
+        "Нативные голосовые могут приходить пустыми — для них нужен MAX_WEBHOOK_URL."
+    )
+    reminders = asyncio.create_task(_remind_loop(bot, db, web_app))
     try:
         await dispatcher.start_polling(bot)
     finally:
         reminders.cancel()
 
 
-async def _remind_loop(bot, db, cabinet_url: str, web_app: str) -> None:
+async def run_bot_webhook(
+    bot: Bot,
+    dispatcher: Dispatcher,
+    db: Database,
+    cabinet_url: str,
+    web_app: str,
+    webhook_url: str,
+    webhook_secret: str,
+) -> None:
+    await dispatcher.startup(bot)
+    await _publish_commands(bot, cabinet_url)
+    try:
+        await bot.delete_webhook()
+    except Exception:
+        log.warning("Не удалось снять старые webhook-подписки.", exc_info=True)
+    try:
+        await bot.subscribe_webhook(
+            webhook_url,
+            update_types=WEBHOOK_UPDATES,
+            secret=webhook_secret,
+        )
+    except Exception:
+        log.exception("Не удалось подписаться на webhook %s", webhook_url)
+        raise
+    log.info("Бот слушает MAX через webhook %s", webhook_url)
+    reminders = asyncio.create_task(_remind_loop(bot, db, web_app))
+    stop = asyncio.Event()
+    try:
+        await stop.wait()
+    finally:
+        reminders.cancel()
+        try:
+            await bot.unsubscribe_webhook(webhook_url)
+        except Exception:
+            log.warning("Не удалось отписаться от webhook при остановке.", exc_info=True)
+        await dispatcher.shutdown()
+
+
+async def _remind_loop(bot, db: Database, web_app: str) -> None:
     await asyncio.sleep(45)
     while True:
         try:
             if not in_quiet_hours():
-                today = moscow_now().date().isoformat()
-                markup = cabinet_keyboard(web_app) if cabinet_url.strip() else None
-                for user in await db.users_to_remind(today):
-                    text = await due_reminder(db, int(user["user_id"]))
-                    if not text:
-                        continue
-                    await bot.send_message(
-                        chat_id=user["chat_id"],
-                        user_id=int(user["user_id"]),
-                        text=text,
-                        attachments=[markup] if markup is not None else None,
-                        parse_mode=ParseMode.HTML,
-                    )
-                    await db.mark_reminded(int(user["user_id"]), today)
+                await _send_reminders(bot, db, web_app)
         except Exception:
-            log.exception("Напоминание о звёздах не отправилось")
-        await asyncio.sleep(1800)
+            log.exception("Цикл напоминаний о банке ошибок упал")
+        await asyncio.sleep(REMIND_EVERY_SECONDS)
+
+
+async def _send_reminders(bot, db: Database, web_app: str) -> None:
+    today = moscow_now().date().isoformat()
+    for user in await db.users_to_remind(today):
+        user_id = int(user["user_id"])
+        text = reminder_text(int(user["open_errors"]))
+        if text is None:
+            continue
+        try:
+            await bot.send_message(
+                chat_id=user["chat_id"],
+                user_id=user_id,
+                text=esc(text),
+                attachments=[reminder_keyboard(web_app)],
+                parse_mode=ParseMode.HTML,
+            )
+        except Exception:
+            log.warning("Напоминание не отправилось user_id=%s", user_id, exc_info=True)
+        await db.mark_reminded(user_id, today)
 
 
 async def amain() -> None:
@@ -93,8 +154,52 @@ async def amain() -> None:
     proxy_url = settings.gemini_proxy_url()
     if settings.proxy_host.strip():
         log.info("Gemini через SOCKS5 %s:%s", settings.proxy_host.strip(), settings.proxy_port)
-    tutor = Tutor(settings.gemini_api_key, settings.gemini_model, proxy_url)
-    app = create_app(db, tutor, settings.max_bot_token, allowed)
+    tutor = Tutor(
+        settings.gemini_api_key,
+        settings.gemini_model,
+        proxy_url,
+        fallback_model=settings.gemini_fallback_model,
+    )
+    if tutor.fallback_models:
+        log.info(
+            "Gemini: основная %s, запасные %s",
+            settings.gemini_model,
+            ", ".join(tutor.fallback_models),
+        )
+
+    token = settings.max_bot_token.strip()
+    bot: Bot | None = None
+    dispatcher: Dispatcher | None = None
+    web_app = ""
+    webhook = None
+    hook_url = ""
+    hook_secret = ""
+    hook_path = "/max-webhook"
+
+    if token:
+        try:
+            hook_url, hook_secret = settings.webhook()
+        except ValueError as error:
+            log.error("%s — включаю long polling без webhook.", error)
+            hook_url, hook_secret = "", ""
+    if token:
+        bot = Bot(token=token, parse_mode=ParseMode.HTML)
+        dispatcher = Dispatcher()
+        web_app = await _bot_username(bot)
+        BotApp(bot, db, tutor, settings.cabinet_url, web_app, allowed).register(dispatcher)
+        if hook_url:
+            webhook = FastAPIMaxWebhook(dp=dispatcher, bot=bot, secret=hook_secret)
+            hook_path = webhook_path(hook_url)
+
+    app = create_app(
+        db,
+        tutor,
+        settings.max_bot_token,
+        allowed,
+        settings.week_quiz_goal,
+        max_webhook=webhook,
+        max_webhook_path=hook_path,
+    )
     server = uvicorn.Server(
         uvicorn.Config(
             app,
@@ -109,9 +214,25 @@ async def amain() -> None:
     try:
         async with asyncio.TaskGroup() as group:
             group.create_task(server.serve())
-            token = settings.max_bot_token.strip()
-            if token:
-                group.create_task(run_bot(token, db, tutor, settings.cabinet_url, allowed))
+            if bot is not None and dispatcher is not None:
+                if hook_url:
+                    group.create_task(
+                        run_bot_webhook(
+                            bot,
+                            dispatcher,
+                            db,
+                            settings.cabinet_url,
+                            web_app,
+                            hook_url,
+                            hook_secret,
+                        )
+                    )
+                else:
+                    group.create_task(
+                        run_bot_polling(
+                            bot, dispatcher, db, settings.cabinet_url, web_app
+                        )
+                    )
             else:
                 log.warning("MAX_BOT_TOKEN пуст: бот не запущен, открыт только кабинет.")
     finally:

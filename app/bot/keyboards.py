@@ -74,6 +74,13 @@ def cabinet_keyboard(web_app: str = ""):
     )
 
 
+def reminder_keyboard(web_app: str = ""):
+    return _markup(
+        [_app_button("🎯 Закрепить ошибки", web_app)],
+        [CallbackButton(text="🏠 Меню", payload="menu:home")],
+    )
+
+
 def back_keyboard():
     return _markup([CallbackButton(text="🏠 Меню", payload="menu:home")])
 
@@ -124,7 +131,7 @@ def check_keyboard(check_id: int, is_correct: bool, web_app: str = ""):
         ],
     ]
     if web_app.strip():
-        rows.append([_app_button("Небо", web_app)])
+        rows.append([_cabinet_button(web_app)])
     return _markup(*rows)
 
 

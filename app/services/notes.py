@@ -1,10 +1,12 @@
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass
 
 from app.db import Database
+from app.services.limits import LIMIT_MESSAGE
 from app.services.skills import normalize_name, record
-from app.services.tutor import CheckResult, Tutor, TutorReply
-from app.textutil import clip, fts_match, markers_to_html, strip_markers
+from app.services.tutor import CheckResult, Tutor, TutorError, TutorReply
+from app.textutil import clip, fts_match, markers_to_html, normalize_subject, strip_markers
 
 log = logging.getLogger(__name__)
 PAGE_SIZE = 5
@@ -71,7 +73,7 @@ async def save_check(db: Database, user_id: int, check: dict) -> int:
     note_id = await db.insert_note(
         user_id=user_id,
         title=title[:80],
-        subject=check.get("subject") or "Школьный предмет",
+        subject=normalize_subject(check.get("subject")),
         body=note_body_from_check(check),
         source="photo" if check.get("student_solution") else "chat",
     )
@@ -82,13 +84,32 @@ async def save_check(db: Database, user_id: int, check: dict) -> int:
     return note_id
 
 
-async def save_manual(db: Database, user_id: int, text: str) -> int:
-    lines = [line.strip() for line in text.splitlines() if line.strip()]
-    title = lines[0][:80] if lines else "Свой конспект"
+def manual_title(text: str, limit: int = 80) -> str:
+    lines = [" ".join(line.split()) for line in text.splitlines() if line.strip()]
+    if not lines:
+        return "Свой конспект"
+    first = lines[0]
+    if len(first) <= limit:
+        return first
+    cut = first[: limit - 1]
+    space = cut.rfind(" ")
+    if space > limit // 2:
+        cut = cut[:space]
+    return cut.rstrip(" ,.;:—-") + "…"
+
+
+async def save_manual(
+    db: Database,
+    user_id: int,
+    text: str,
+    title: str = "",
+    subject: str = "",
+) -> int:
+    clean_title = " ".join(title.split())[:120] or manual_title(text)
     return await db.insert_note(
         user_id=user_id,
-        title=title,
-        subject="Свой конспект",
+        title=clean_title,
+        subject=normalize_subject(subject),
         body=text.strip(),
         source="manual",
     )
@@ -126,7 +147,6 @@ async def register_check(
         tutor,
     )
     if change is not None:
-        result.star_line = change.sentence
         await db.set_check_skill(check_id, change.skill_id)
     if not result.is_correct:
         await db.insert_error(
@@ -152,7 +172,17 @@ def _hit_from_fts(row: dict) -> NoteHit:
     )
 
 
-async def search_notes(db: Database, tutor: Tutor, user_id: int, query: str) -> list[NoteHit]:
+class SearchLimited(TutorError):
+    pass
+
+
+async def search_notes(
+    db: Database,
+    tutor: Tutor,
+    user_id: int,
+    query: str,
+    spend: Callable[[], bool] | None = None,
+) -> list[NoteHit]:
     cleaned = query.strip()
     if not cleaned:
         return []
@@ -170,6 +200,8 @@ async def search_notes(db: Database, tutor: Tutor, user_id: int, query: str) -> 
     cards = await db.note_cards(user_id)
     if not cards:
         return []
+    if spend is not None and not spend():
+        raise SearchLimited(LIMIT_MESSAGE)
     ids = await tutor.pick_notes(cleaned, cards)
     hits: list[NoteHit] = []
     for note_id in ids:

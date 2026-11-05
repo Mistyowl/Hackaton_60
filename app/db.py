@@ -6,7 +6,7 @@ from zoneinfo import ZoneInfo
 
 import aiosqlite
 
-from app.textutil import MARK_START, utcnow
+from app.textutil import MARK_START, normalize_subject, utcnow
 
 CABINET_SESSION_MINUTES = 45
 WEEK_GOAL = 5
@@ -62,6 +62,8 @@ CREATE TABLE IF NOT EXISTS errors (
     mistake TEXT NOT NULL,
     explanation TEXT NOT NULL,
     skill_id INTEGER,
+    source TEXT NOT NULL DEFAULT 'check',
+    question_id INTEGER,
     resolved_at TEXT,
     created_at TEXT NOT NULL
 );
@@ -160,13 +162,6 @@ CREATE TRIGGER IF NOT EXISTS notes_au AFTER UPDATE ON notes BEGIN
     VALUES (new.id, new.title, new.body, new.subject);
 END;
 
-CREATE TABLE IF NOT EXISTS cabinet_links (
-    token TEXT PRIMARY KEY,
-    user_id INTEGER NOT NULL,
-    expires_at TEXT NOT NULL,
-    used_at TEXT
-);
-
 CREATE TABLE IF NOT EXISTS cabinet_sessions (
     token TEXT PRIMARY KEY,
     user_id INTEGER NOT NULL,
@@ -199,6 +194,8 @@ class Database:
         await self._ensure_user_columns()
         await self._ensure_note_columns()
         await self._ensure_skill_columns()
+        await self._normalize_subjects()
+        await self._conn.execute("DROP TABLE IF EXISTS cabinet_links")
         await self._conn.commit()
 
     async def close(self) -> None:
@@ -230,6 +227,18 @@ class Database:
         if "exam_goal" not in have:
             await self.conn.execute("ALTER TABLE users ADD COLUMN exam_goal TEXT")
 
+    async def _normalize_subjects(self) -> None:
+        # skills не трогаем: UNIQUE(user_id, subject, name) может склеить строки.
+        for table in ("notes", "errors", "checks", "quiz_questions"):
+            cursor = await self.conn.execute(f"SELECT DISTINCT subject FROM {table}")
+            for row in await cursor.fetchall():
+                raw = row["subject"]
+                fixed = normalize_subject(raw)
+                if fixed != raw:
+                    await self.conn.execute(
+                        f"UPDATE {table} SET subject = ? WHERE subject = ?", (fixed, raw)
+                    )
+
     async def _ensure_note_columns(self) -> None:
         cursor = await self.conn.execute("PRAGMA table_info(notes)")
         have = {row["name"] for row in await cursor.fetchall()}
@@ -247,6 +256,12 @@ class Database:
             await self.conn.execute("ALTER TABLE errors ADD COLUMN skill_id INTEGER")
         if "resolved_at" not in have:
             await self.conn.execute("ALTER TABLE errors ADD COLUMN resolved_at TEXT")
+        if "source" not in have:
+            await self.conn.execute(
+                "ALTER TABLE errors ADD COLUMN source TEXT NOT NULL DEFAULT 'check'"
+            )
+        if "question_id" not in have:
+            await self.conn.execute("ALTER TABLE errors ADD COLUMN question_id INTEGER")
         cursor = await self.conn.execute("PRAGMA table_info(checks)")
         have = {row["name"] for row in await cursor.fetchall()}
         if "skill_id" not in have:
@@ -289,8 +304,7 @@ class Database:
     async def get_user(self, user_id: int) -> dict:
         cursor = await self.conn.execute(
             """
-            SELECT user_id, first_name, grade, explain_style, exam_goal,
-                   chat_id, reminders, last_reminder_on
+            SELECT user_id, first_name, grade, explain_style, exam_goal, chat_id, reminders
             FROM users WHERE user_id = ?
             """,
             (user_id,),
@@ -300,8 +314,7 @@ class Database:
             await self.upsert_user(user_id, "")
             cursor = await self.conn.execute(
                 """
-                SELECT user_id, first_name, grade, explain_style, exam_goal,
-                       chat_id, reminders, last_reminder_on
+                SELECT user_id, first_name, grade, explain_style, exam_goal, chat_id, reminders
                 FROM users WHERE user_id = ?
                 """,
                 (user_id,),
@@ -349,11 +362,39 @@ class Database:
         )
         await self.conn.commit()
 
+    async def set_reminders(self, user_id: int, enabled: bool) -> None:
+        await self.conn.execute(
+            "UPDATE users SET reminders = ? WHERE user_id = ?",
+            (1 if enabled else 0, user_id),
+        )
+        await self.conn.commit()
+
+    async def users_to_remind(self, today: str) -> list[dict]:
+        cursor = await self.conn.execute(
+            """
+            SELECT users.user_id, users.chat_id, COUNT(errors.id) AS open_errors
+            FROM users
+            JOIN errors ON errors.user_id = users.user_id AND errors.resolved_at IS NULL
+            WHERE users.reminders = 1
+              AND users.chat_id IS NOT NULL
+              AND (users.last_reminder_on IS NULL OR users.last_reminder_on < ?)
+            GROUP BY users.user_id, users.chat_id
+            """,
+            (today,),
+        )
+        return [dict(row) for row in await cursor.fetchall()]
+
+    async def mark_reminded(self, user_id: int, today: str) -> None:
+        await self.conn.execute(
+            "UPDATE users SET last_reminder_on = ? WHERE user_id = ?",
+            (today, user_id),
+        )
+        await self.conn.commit()
+
     async def find_user(self, user_id: int) -> dict | None:
         cursor = await self.conn.execute(
             """
-            SELECT user_id, first_name, grade, explain_style, exam_goal,
-                   chat_id, reminders, last_reminder_on
+            SELECT user_id, first_name, grade, explain_style, exam_goal, chat_id
             FROM users WHERE user_id = ?
             """,
             (user_id,),
@@ -379,7 +420,7 @@ class Database:
         cursor = await self.conn.execute(
             """
             SELECT users.user_id, users.first_name, users.grade, users.explain_style,
-                   users.exam_goal, users.chat_id, users.reminders, users.last_reminder_on
+                   users.exam_goal, users.chat_id, users.reminders
             FROM cabinet_sessions
             JOIN users ON users.user_id = cabinet_sessions.user_id
             WHERE cabinet_sessions.token = ? AND cabinet_sessions.expires_at > ?
@@ -525,7 +566,7 @@ class Database:
     async def get_note(self, user_id: int, note_id: int) -> dict | None:
         cursor = await self.conn.execute(
             """
-            SELECT id, user_id, title, subject, body, source, created_at
+            SELECT id, user_id, title, subject, body, source, pinned, created_at
             FROM notes
             WHERE id = ? AND user_id = ?
             """,
@@ -628,11 +669,16 @@ class Database:
         mistake: str,
         explanation: str,
         skill_id: int | None = None,
+        source: str = "check",
+        question_id: int | None = None,
     ) -> int:
         cursor = await self.conn.execute(
             """
-            INSERT INTO errors (user_id, subject, problem, mistake, explanation, skill_id, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO errors (
+                user_id, subject, problem, mistake, explanation,
+                skill_id, source, question_id, created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 user_id,
@@ -641,16 +687,30 @@ class Database:
                 mistake.strip()[:300] or "ошибка в решении",
                 explanation.strip()[:2000],
                 skill_id,
+                (source or "check")[:20],
+                question_id,
                 utcnow(),
             ),
         )
         await self.conn.commit()
         return int(cursor.lastrowid)
 
+    async def has_error_for_question(self, user_id: int, question_id: int) -> bool:
+        cursor = await self.conn.execute(
+            """
+            SELECT 1 AS ok
+            FROM errors
+            WHERE user_id = ? AND question_id = ?
+            LIMIT 1
+            """,
+            (user_id, question_id),
+        )
+        return await cursor.fetchone() is not None
+
     async def list_errors(self, user_id: int, limit: int = 8) -> list[dict]:
         cursor = await self.conn.execute(
             """
-            SELECT id, subject, problem, mistake, explanation, skill_id, created_at
+            SELECT id, subject, problem, mistake, explanation, skill_id, source, created_at
             FROM errors
             WHERE user_id = ? AND resolved_at IS NULL
             ORDER BY id DESC
@@ -663,13 +723,22 @@ class Database:
     async def list_error_bank(self, user_id: int, limit: int = 40) -> list[dict]:
         cursor = await self.conn.execute(
             """
-            SELECT id, subject, problem, mistake, explanation, skill_id,
-                   resolved_at, created_at
-            FROM errors
-            WHERE user_id = ?
+            SELECT e.id, e.subject, e.problem, e.mistake, e.explanation, e.skill_id,
+                   e.source, e.question_id, e.resolved_at, e.created_at,
+                   COALESCE(s.name, '') AS skill_name,
+                   CASE WHEN s.id IS NULL THEN 0 ELSE MIN(3, (
+                       SELECT COUNT(*) FROM skill_events ev
+                       WHERE ev.skill_id = s.id AND ev.id > COALESCE((
+                           SELECT MAX(bad.id) FROM skill_events bad
+                           WHERE bad.skill_id = s.id AND bad.correct = 0
+                       ), 0)
+                   )) END AS progress
+            FROM errors e
+            LEFT JOIN skills s ON s.id = e.skill_id AND s.user_id = e.user_id
+            WHERE e.user_id = ?
             ORDER BY
-              CASE WHEN resolved_at IS NULL THEN 0 ELSE 1 END,
-              id DESC
+              CASE WHEN e.resolved_at IS NULL THEN 0 ELSE 1 END,
+              e.id DESC
             LIMIT ?
             """,
             (user_id, limit),
@@ -725,7 +794,7 @@ class Database:
             "streak_days": home["streak_days"],
         }
 
-    async def home_stats(self, user_id: int, today: date) -> dict:
+    async def home_stats(self, user_id: int, today: date, week_goal: int = WEEK_GOAL) -> dict:
         open_errors = await self.count_errors(user_id)
         cursor = await self.conn.execute(
             """
@@ -739,7 +808,19 @@ class Database:
             day = _moscow_day(row["finished_at"])
             if day is not None:
                 finished.append(day)
+        cursor = await self.conn.execute(
+            """
+            SELECT created_at FROM checks WHERE user_id = ?
+            UNION ALL
+            SELECT created_at FROM notes WHERE user_id = ?
+            """,
+            (user_id, user_id),
+        )
         days = set(finished)
+        for row in await cursor.fetchall():
+            day = _moscow_day(row["created_at"])
+            if day is not None:
+                days.add(day)
         streak = 0
         cursor_day = today if today in days else today - timedelta(days=1)
         while cursor_day in days:
@@ -751,7 +832,7 @@ class Database:
             "open_errors": open_errors,
             "streak_days": streak,
             "week_done": week_done,
-            "week_goal": WEEK_GOAL,
+            "week_goal": week_goal,
         }
 
     async def insert_check(self, user_id: int, fields: dict) -> int:
@@ -886,6 +967,14 @@ class Database:
         row = await cursor.fetchone()
         return int(row["done"] or 0), int(row["total"] or 0)
 
+    async def quiz_asked(self, quiz_id: int) -> int:
+        cursor = await self.conn.execute(
+            "SELECT COUNT(*) AS asked FROM quiz_questions WHERE quiz_id = ? AND attempts > 0",
+            (quiz_id,),
+        )
+        row = await cursor.fetchone()
+        return int(row["asked"] or 0)
+
     async def mark_question_done(self, question_id: int) -> None:
         await self.conn.execute(
             """
@@ -954,13 +1043,6 @@ class Database:
         await self.conn.execute(
             "UPDATE users SET chat_id = ? WHERE user_id = ?",
             (chat_id, user_id),
-        )
-        await self.conn.commit()
-
-    async def set_reminders(self, user_id: int, enabled: bool) -> None:
-        await self.conn.execute(
-            "UPDATE users SET reminders = ? WHERE user_id = ?",
-            (1 if enabled else 0, user_id),
         )
         await self.conn.commit()
 
@@ -1038,21 +1120,6 @@ class Database:
         )
         await self.conn.commit()
 
-    async def list_skill_events(self, skill_id: int, limit: int = 12) -> list[dict]:
-        cursor = await self.conn.execute(
-            """
-            SELECT kind, correct, created_at
-            FROM skill_events
-            WHERE skill_id = ?
-            ORDER BY id DESC
-            LIMIT ?
-            """,
-            (skill_id, limit),
-        )
-        rows = [dict(row) for row in await cursor.fetchall()]
-        rows.reverse()
-        return rows
-
     async def resolve_errors(self, user_id: int, skill_id: int) -> None:
         await self.conn.execute(
             """
@@ -1103,27 +1170,6 @@ class Database:
             (user_id, skill_id),
         )
         return [dict(row) for row in await cursor.fetchall()]
-
-    async def users_to_remind(self, today: str) -> list[dict]:
-        cursor = await self.conn.execute(
-            """
-            SELECT user_id, first_name, chat_id
-            FROM users
-            WHERE reminders = 1
-              AND chat_id IS NOT NULL
-              AND (last_reminder_on IS NULL OR last_reminder_on < ?)
-            """,
-            (today,),
-        )
-        return [dict(row) for row in await cursor.fetchall()]
-
-    async def mark_reminded(self, user_id: int, today: str) -> None:
-        await self.conn.execute(
-            "UPDATE users SET last_reminder_on = ? WHERE user_id = ?",
-            (today, user_id),
-        )
-        await self.conn.commit()
-
 
 def _until(minutes: int) -> str:
     return (datetime.now(timezone.utc) + timedelta(minutes=minutes)).isoformat(timespec="seconds")

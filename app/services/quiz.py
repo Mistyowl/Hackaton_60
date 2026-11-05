@@ -2,9 +2,9 @@ import json
 from dataclasses import dataclass
 
 from app.db import Database
-from app.services.skills import dim_skills, record
+from app.services.skills import record
 from app.services.tutor import Tutor, TutorError
-from app.textutil import format_elapsed
+from app.textutil import format_elapsed, normalize_subject
 
 
 @dataclass
@@ -20,7 +20,6 @@ class AnswerView:
     elapsed: str
     quiz_title: str
     next_question: dict | None
-    star: str = ""
     skill_id: int | None = None
 
 
@@ -29,8 +28,15 @@ def question_options(question: dict) -> list[str]:
     return [str(option) for option in options]
 
 
+async def _learner(db: Database, user_id: int) -> dict:
+    user = await db.get_user(user_id)
+    return {"grade": user.get("grade"), "exam_goal": user.get("exam_goal")}
+
+
 async def start_topic_quiz(db: Database, tutor: Tutor, user_id: int, topic: str, wanted: int = 6) -> int:
-    title, drafts = await tutor.make_quiz(topic=topic, errors=None, fallback=topic, wanted=wanted)
+    title, drafts = await tutor.make_quiz(
+        topic=topic, errors=None, fallback=topic, wanted=wanted, **await _learner(db, user_id)
+    )
     return await _save_quiz(db, user_id, title, "topic", drafts)
 
 
@@ -38,40 +44,10 @@ async def start_note_quiz(db: Database, tutor: Tutor, user_id: int, note: dict, 
     body = (note.get("body") or "")[:4000]
     title = (note.get("title") or "Конспект")[:80]
     prompt = f"{title}\nКонспект:\n{body}" if body else title
-    quiz_title, drafts = await tutor.make_quiz(topic=prompt, errors=None, fallback=title, wanted=wanted)
-    return await _save_quiz(db, user_id, quiz_title, "note", drafts)
-
-
-async def start_review_quiz(
-    db: Database,
-    tutor: Tutor,
-    user_id: int,
-    skill_id: int | None = None,
-) -> tuple[int, list[int]] | None:
-    skills = await db.list_skills(user_id)
-    if skill_id is not None:
-        chosen = [skill for skill in skills if int(skill["id"]) == skill_id]
-    else:
-        chosen = dim_skills(skills, limit=3)
-    if not chosen:
-        return None
-    payload = [
-        {
-            "subject": skill["subject"],
-            "problem": skill["name"],
-            "mistake": skill["name"],
-            "explanation": "Повтори этот приём на новой задаче.",
-        }
-        for skill in chosen
-    ]
-    title, drafts = await tutor.make_quiz(
-        topic=None,
-        errors=payload,
-        fallback="Повторение",
-        wanted=4,
+    quiz_title, drafts = await tutor.make_quiz(
+        topic=prompt, errors=None, fallback=title, wanted=wanted, **await _learner(db, user_id)
     )
-    quiz_id = await _save_quiz(db, user_id, title or "Повторение", "review", drafts)
-    return quiz_id, [int(skill["id"]) for skill in chosen]
+    return await _save_quiz(db, user_id, quiz_title, "note", drafts)
 
 
 async def _save_quiz(db: Database, user_id: int, title: str, source: str, drafts) -> int:
@@ -96,7 +72,7 @@ async def start_error_quiz(db: Database, tutor: Tutor, user_id: int) -> int | No
         }
         for item in errors
     ]
-    title, drafts = await tutor.make_quiz(topic=None, errors=payload)
+    title, drafts = await tutor.make_quiz(topic=None, errors=payload, **await _learner(db, user_id))
     return await db.create_quiz(
         user_id,
         title or "По моим ошибкам",
@@ -138,17 +114,30 @@ async def answer_question(
         await db.mark_question_done(question_id)
     else:
         await db.requeue_question(question_id)
-    kind = "review" if quiz.get("source") == "review" else "quiz"
-    # Без Gemini: проверка ответа должна быть мгновенной.
     change = await record(
         db,
         user_id,
         question.get("subject") or "",
         question.get("skill") or "",
         correct,
-        kind,
+        "quiz",
         None,
     )
+    if (
+        not correct
+        and quiz.get("source") in {"topic", "note"}
+        and not await db.has_error_for_question(user_id, question_id)
+    ):
+        await db.insert_error(
+            user_id=user_id,
+            subject=normalize_subject(question.get("subject")),
+            problem=question.get("prompt") or "Вопрос квиза",
+            mistake=question.get("skill") or "ошибка в квизе",
+            explanation=question.get("explanation") or "Нужно разобрать этот шаг ещё раз.",
+            skill_id=change.skill_id if change else None,
+            source="quiz",
+            question_id=question_id,
+        )
     done, total = await db.quiz_counts(quiz["id"])
     nxt = await db.next_pending(quiz["id"])
     finished = nxt is None
@@ -166,7 +155,6 @@ async def answer_question(
         elapsed=elapsed,
         quiz_title=quiz["title"],
         next_question=nxt,
-        star=change.sentence if change else "",
         skill_id=change.skill_id if change else None,
     )
 
@@ -190,5 +178,5 @@ def _missing() -> AnswerView:
 def ensure_topic(topic: str) -> str:
     cleaned = topic.strip()
     if len(cleaned) < 2:
-        raise TutorError("Напишите тему квиза, например: квадратные уравнения.")
+        raise TutorError("Напиши тему квиза, например: квадратные уравнения.")
     return cleaned

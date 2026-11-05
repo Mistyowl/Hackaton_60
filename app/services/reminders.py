@@ -1,9 +1,6 @@
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-from app.db import Database
-from app.services.skills import dim_skills
-
 MOSCOW = ZoneInfo("Europe/Moscow")
 
 
@@ -16,28 +13,23 @@ def in_quiet_hours(moment: datetime | None = None) -> bool:
     return not 9 <= current.hour < 21
 
 
-def star_word(count: int) -> str:
+def _errors_word(count: int) -> str:
     number = abs(count) % 100
     tail = number % 10
     if 11 <= number <= 14:
-        return "звёзд"
+        return "незакреплённых ошибок"
     if tail == 1:
-        return "звезда"
+        return "незакреплённая ошибка"
     if 2 <= tail <= 4:
-        return "звезды"
-    return "звёзд"
+        return "незакреплённые ошибки"
+    return "незакреплённых ошибок"
 
 
-def reminder_line(count: int) -> str:
-    word = star_word(count)
-    if count == 1:
-        return "1 звезда тускнеет. 3 вопроса на 1 минуту."
-    return f"{count} {word} тускнеют. 3 вопроса на 1 минуту."
-
-
-async def due_reminder(db: Database, user_id: int) -> str | None:
-    skills = await db.list_skills(user_id)
-    faded = dim_skills(skills, limit=12)
-    if not faded:
+def reminder_text(open_errors: int) -> str | None:
+    if open_errors <= 0:
         return None
-    return reminder_line(len(faded))
+    return (
+        f"В банке {open_errors} {_errors_word(open_errors)}. "
+        "Короткий квиз по ним займёт пару минут и поможет закрепить приём. "
+        "Выключить напоминания можно в профиле кабинета."
+    )

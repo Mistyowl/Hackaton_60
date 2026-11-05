@@ -1,7 +1,8 @@
-const LOCKED = "Откройте кабинет кнопкой в чате MAX.";
+const LOCKED = "Открой кабинет кнопкой в чате MAX.";
+const DENIED = "Кабинет пока открыт только для участников теста.";
+const NO_CHAT = "Напиши Люми в чате MAX — там можно спросить задачу или прислать фото.";
 const EMPTY_NOTES = "Конспекты появятся, когда в чате нажмёшь «В конспект».";
-const EMPTY_ERRORS = "Банк ошибок пуст. Пришли решение с ошибкой — по этому пробелу я соберу отдельный квиз.";
-const BOOK = '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>';
+const EMPTY_ERRORS = "Банк ошибок пуст. Ошибки появятся после квиза или проверки решения в чате.";
 const CHEV = '<span class="chev"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 6l6 6-6 6"/></svg></span>';
 const PIN = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 4h6l-1 7 3 3v2H7v-2l3-3-1-7z"/><path d="M12 16v5"/></svg>';
 const MARK = '<span class="mark"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M5 12l5 5L20 7"/></svg></span>';
@@ -17,8 +18,9 @@ const gradeInput = document.querySelector("#grade-input");
 const goalInput = document.querySelector("#goal-input");
 const saveButton = document.querySelector("#save-profile");
 const saveStatus = document.querySelector("#save-status");
+const styleInput = document.querySelector("#style-input");
 const remindersInput = document.querySelector("#reminders-input");
-const styleSlider = document.querySelector("#style-slider");
+let savedProfile = "";
 
 const state = {
   profile: {
@@ -31,14 +33,13 @@ const state = {
   errorCounts: { new: 0, active: 0, closed: 0 },
   notesFilter: "all",
   errorsFilter: "all",
-  sky: null,
   selectedNoteId: null,
   quizPick: { subject: "algebra", noteId: null, count: 5 },
   noteReturn: "notes",
   quizReturn: "home",
   quizKind: "topic",
-  screen: "home",
-  star: null
+  loadingFrom: "quiz",
+  screen: "home"
 };
 let quiz = null;
 let currentNote = null;
@@ -50,6 +51,7 @@ const deletingNotes = new Set();
 const pinningNotes = new Set();
 let swipeDrag = null;
 let pendingDelete = null;
+let openErrorId = null;
 
 function bridge() {
   return window.WebApp || null;
@@ -100,7 +102,11 @@ function showGate(text) {
   cabinet.hidden = true;
   tabs.hidden = true;
   gate.hidden = false;
-  gate.textContent = text;
+  document.querySelector("#gate-text").textContent = text;
+  document.querySelector(".gate-hint").hidden = text !== LOCKED;
+  document.querySelector("#gate-title").textContent = text === LOCKED
+    ? "Кабинет открывается из чата"
+    : text === DENIED ? "Доступ пока закрыт" : "Что-то пошло не так";
 }
 
 function showCabinet() {
@@ -109,8 +115,40 @@ function showCabinet() {
   tabs.hidden = false;
 }
 
+function locked(response) {
+  if (response.status === 401) {
+    showGate(LOCKED);
+    return true;
+  }
+  if (response.status === 403) {
+    showGate(DENIED);
+    return true;
+  }
+  return false;
+}
+
+let toastTimer = null;
+
+function showToast(text) {
+  const toast = document.querySelector("#toast");
+  toast.textContent = text;
+  toast.hidden = false;
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => { toast.hidden = true; }, 2600);
+}
+
+function backToChat(text) {
+  const app = bridge();
+  if (!app || !app.initData || !app.close) {
+    showToast(NO_CHAT);
+    return;
+  }
+  showToast(text);
+  setTimeout(() => app.close(), 700);
+}
+
 function tabFor(screen) {
-  if (screen === "notes" || screen === "note") return "notes";
+  if (screen === "notes" || screen === "note" || screen === "note-new") return "notes";
   if (screen === "profile") return "profile";
   if (screen === "quiz-errors" || ((screen === "quiz-play" || screen === "quiz-loading") && state.quizKind === "errors")) return "errors";
   if (screen === "quiz" || screen.startsWith("quiz-")) return "quiz";
@@ -122,11 +160,6 @@ function closeConfirm() {
   document.querySelector("#confirm-delete").hidden = true;
 }
 
-function closeStar() {
-  state.star = null;
-  document.querySelector("#star-sheet").hidden = true;
-}
-
 function closeSwipes() {
   document.querySelectorAll(".swipe").forEach((row) => setSwipeOpen(row, ""));
 }
@@ -134,7 +167,6 @@ function closeSwipes() {
 function showScreen(name) {
   closeSwipes();
   closeConfirm();
-  if (name !== "sky") closeStar();
   state.screen = name;
   document.querySelectorAll("[data-screen]").forEach((section) => {
     section.hidden = section.dataset.screen !== name;
@@ -158,8 +190,44 @@ function showScreen(name) {
     }
   }
   confirmClose(name === "quiz-play" || name === "quiz-loading");
+  if (name === "quiz-loading") startLoadingTips();
+  else clearInterval(loadingTimer);
   if (name === "home" || name === "quiz") refreshHome().catch(() => {});
   if (name === "quiz") paintQuizSetup();
+}
+
+const LOADING_TIPS = [
+  "Обычно это занимает до минуты — не закрывай экран.",
+  "Если модель занята, Люми пробует запасной вариант.",
+  "Подбираю вопросы под твой класс.",
+  "Неверный ответ не страшен — вопрос вернётся в конце квиза.",
+  "Ошибки из квиза попадут в банк, их можно закрепить позже."
+];
+let loadingTimer = null;
+
+function startLoadingTips() {
+  let index = 0;
+  const tip = document.querySelector("#loading-tip");
+  tip.textContent = LOADING_TIPS[0];
+  clearInterval(loadingTimer);
+  loadingTimer = setInterval(() => {
+    index = (index + 1) % LOADING_TIPS.length;
+    tip.textContent = LOADING_TIPS[index];
+  }, 4000);
+}
+
+function cancelQuizLoading() {
+  if (state.screen !== "quiz-loading") return;
+  quizToken += 1;
+  document.querySelector("#start-setup").disabled = false;
+  document.querySelector("#start-topic").disabled = state.selectedNoteId == null;
+  document.querySelector("#start-errors").disabled = !state.errors.some((row) => row.status !== "closed");
+  showScreen(state.loadingFrom || "quiz");
+}
+
+function quizOrigin() {
+  if (quiz && quiz.origin && quiz.origin !== "quiz-loading" && quiz.origin !== "quiz-play") return quiz.origin;
+  return state.quizKind === "errors" ? "quiz-errors" : "quiz";
 }
 
 function goBack() {
@@ -169,9 +237,10 @@ function goBack() {
     return;
   }
   if (screen === "note") showScreen(state.noteReturn || "notes");
-  else if (screen === "quiz-play" || screen === "quiz-loading") showScreen(state.quizKind === "errors" ? "quiz-errors" : state.quizKind === "review" ? "sky" : "quiz");
+  else if (screen === "quiz-loading") cancelQuizLoading();
+  else if (screen === "quiz-play") showScreen(quizOrigin());
   else if (screen === "quiz-topic" || screen === "quiz-errors") showScreen(state.quizReturn || "home");
-  else if (screen === "profile") showScreen("home");
+  else if (screen === "note-new") showScreen("notes");
   else showScreen("home");
 }
 
@@ -227,13 +296,15 @@ function paintIdentity() {
 }
 
 function subjectMark(subject) {
-  const text = String(subject || "").toLowerCase();
+  const text = String(subject || "").trim().toLowerCase();
   if (text.includes("геометр")) return "Δ";
   if (text.includes("физик")) return "⚛";
   if (text.includes("русск")) return "Аа";
   if (text.includes("хими")) return "Cl";
-  if (text.includes("англий")) return "En";
-  return "Σ";
+  if (text.includes("англ")) return "En";
+  if (text.includes("математ") || text.includes("алгебр")) return "Σ";
+  if (!text || text === "другое") return "✎";
+  return text.slice(0, 2).replace(/^./, (char) => char.toUpperCase());
 }
 
 function fromChat(note) {
@@ -329,29 +400,47 @@ async function refreshHome() {
   const ticket = ++homeTicket;
   const response = await fetch("/api/home");
   if (ticket !== homeTicket) return;
-  if (response.status === 401) return showGate(LOCKED);
+  if (locked(response)) return;
   if (!response.ok) return;
   state.home = await response.json();
   if (state.screen === "home") paintHome();
   paintQuizSetup();
 }
 
+let profileTicket = 0;
+async function refreshProfile() {
+  const ticket = ++profileTicket;
+  const response = await fetch("/api/profile");
+  if (ticket !== profileTicket) return;
+  if (locked(response)) return;
+  if (!response.ok) return;
+  const fresh = await response.json();
+  ["quizzes_done", "closed_errors", "accuracy", "streak_days"].forEach((key) => {
+    state.profile[key] = fresh[key];
+  });
+  paintProfileStats();
+}
+
 function filteredNotes() {
   const filter = state.notesFilter || "all";
   if (filter === "all") return state.notes.slice();
   if (filter === "chat") return state.notes.filter((note) => fromChat(note));
-  const subject = subjectById(filter);
-  return notesForSubject(subject);
+  return state.notes.filter((note) => noteSubject(note) === filter.slice(2));
+}
+
+function noteSubject(note) {
+  return String(note.subject || "").trim() || "Другое";
 }
 
 function paintNotesFilters() {
   const box = document.querySelector("#notes-filters");
   if (!box) return;
-  const chips = [
-    { id: "all", label: "Все" },
-    { id: "chat", label: "Из чата" },
-    ...SUBJECTS.map((item) => ({ id: item.id, label: item.label }))
-  ];
+  const subjects = Array.from(new Set(state.notes.map(noteSubject))).sort((left, right) => left.localeCompare(right, "ru"));
+  const chips = [{ id: "all", label: "Все" }];
+  if (state.notes.some(fromChat)) chips.push({ id: "chat", label: "Из чата" });
+  subjects.forEach((name) => chips.push({ id: "s:" + name, label: name }));
+  if (!chips.some((chip) => chip.id === state.notesFilter)) state.notesFilter = "all";
+  box.hidden = state.notes.length === 0 || document.querySelector("#search-input").value.trim() !== "";
   box.innerHTML = chips.map((chip) => `
     <button type="button" class="filter-chip${state.notesFilter === chip.id ? " on" : ""}" data-notes-filter="${escapeHtml(chip.id)}">${escapeHtml(chip.label)}</button>
   `).join("");
@@ -371,7 +460,7 @@ function paintNotes() {
   }
   const groups = new Map();
   rows.forEach((note) => {
-    const key = note.subject || "Без предмета";
+    const key = noteSubject(note);
     if (!groups.has(key)) groups.set(key, []);
     groups.get(key).push(note);
   });
@@ -398,21 +487,40 @@ function paintTopics() {
 }
 
 const SUBJECTS = [
-  { id: "algebra", label: "Алгебра", match: "алгебр" },
-  { id: "geometry", label: "Геометрия", match: "геометр" },
-  { id: "physics", label: "Физика", match: "физик" },
-  { id: "russian", label: "Русский", match: "русск" },
-  { id: "chemistry", label: "Химия", match: "хими" },
-  { id: "english", label: "Английский", match: "англий" }
+  { id: "algebra", label: "Алгебра" },
+  { id: "geometry", label: "Геометрия" },
+  { id: "physics", label: "Физика" },
+  { id: "russian", label: "Русский язык" },
+  { id: "chemistry", label: "Химия" },
+  { id: "english", label: "Английский" }
 ];
+const NOTE_SUBJECTS = SUBJECTS.map((item) => item.label).concat("Другое");
+const CUSTOM_TOPIC = "custom";
 
 function subjectById(id) {
   return SUBJECTS.find((item) => item.id === id) || SUBJECTS[0];
 }
 
 function notesForSubject(subject) {
-  const needle = subject.match;
-  return state.notes.filter((note) => (note.subject || "").toLowerCase().includes(needle));
+  return state.notes.filter((note) => noteSubject(note) === subject.label);
+}
+
+function paintSubjectPicks(box, picked, extra = "") {
+  const names = extra && !NOTE_SUBJECTS.includes(extra) ? [extra].concat(NOTE_SUBJECTS) : NOTE_SUBJECTS;
+  const current = names.includes(picked) ? picked : "Другое";
+  box.dataset.extra = extra;
+  box.innerHTML = names.map((name) => `
+    <button type="button" class="filter-chip${name === current ? " on" : ""}" data-pick-subject="${escapeHtml(name)}" aria-pressed="${name === current ? "true" : "false"}">${escapeHtml(name)}</button>
+  `).join("");
+  box.dataset.value = current;
+}
+
+function bindSubjectPicks(box) {
+  box.addEventListener("click", (event) => {
+    const chip = event.target.closest("[data-pick-subject]");
+    if (!chip) return;
+    paintSubjectPicks(box, chip.dataset.pickSubject, box.dataset.extra || "");
+  });
 }
 
 function paintQuizSetup() {
@@ -431,15 +539,21 @@ function paintQuizSetup() {
     else button.setAttribute("aria-pressed", "false");
   });
   const topics = notesForSubject(subject);
-  if (state.quizPick.noteId != null && !topics.some((note) => String(note.id) === String(state.quizPick.noteId))) {
+  const custom = state.quizPick.noteId === CUSTOM_TOPIC;
+  if (state.quizPick.noteId != null && !custom && !topics.some((note) => String(note.id) === String(state.quizPick.noteId))) {
     state.quizPick.noteId = null;
   }
-  const chips = [`<button type="button" class="pick${state.quizPick.noteId == null ? " on" : ""}" data-topic="">Все темы</button>`];
+  const chips = [
+    `<button type="button" class="pick${state.quizPick.noteId == null ? " on" : ""}" data-topic="">Все темы</button>`,
+    `<button type="button" class="pick${custom ? " on" : ""}" data-topic="${CUSTOM_TOPIC}">✎ Своя тема</button>`
+  ];
   topics.slice(0, 8).forEach((note) => {
     const on = String(note.id) === String(state.quizPick.noteId);
     chips.push(`<button type="button" class="pick${on ? " on" : ""}" data-topic="${escapeHtml(note.id)}">${escapeHtml(note.title || "Конспект")}</button>`);
   });
   document.querySelector("#topic-chips").innerHTML = chips.join("");
+  document.querySelector("#topic-hint").hidden = topics.length > 0 || custom;
+  document.querySelector("#custom-topic-wrap").hidden = !custom;
   document.querySelectorAll("#count-chips [data-count]").forEach((button) => {
     const on = Number(button.dataset.count) === Number(state.quizPick.count);
     button.classList.toggle("on", on);
@@ -455,9 +569,9 @@ function setGrade(value, notify) {
     button.classList.toggle("on", button.dataset.grade === grade);
   });
   if (notify) {
-    if (saveButton.textContent !== "Сохранить") saveButton.textContent = "Сохранить";
     if (!goalInput.value) setGoal(defaultGoal(grade), false);
     previewFromForm();
+    markProfileDirty();
   }
 }
 
@@ -468,8 +582,8 @@ function setGoal(value, notify) {
     button.classList.toggle("on", button.dataset.goal === goal);
   });
   if (notify) {
-    if (saveButton.textContent !== "Сохранить") saveButton.textContent = "Сохранить";
     previewFromForm();
+    markProfileDirty();
   }
 }
 
@@ -483,20 +597,34 @@ function previewFromForm() {
   else document.querySelector("#preview-meta").textContent = "Ученик";
 }
 
-function paintStyle(style) {
-  const value = style === "detail" ? "1" : "0";
-  if (styleSlider) styleSlider.value = value;
+function setStyle(style, markDirty) {
+  const value = style === "detail" ? "detail" : "short";
+  styleInput.value = value;
+  document.querySelectorAll("#style-row [data-style]").forEach((button) => {
+    const on = button.dataset.style === value;
+    button.classList.toggle("on", on);
+    button.setAttribute("aria-pressed", on ? "true" : "false");
+  });
   const text = document.querySelector("#style-preview-text");
   if (text) {
-    text.textContent = style === "detail"
+    text.textContent = value === "detail"
       ? "Разберу шаг за шагом и покажу, на что смотреть."
       : "Объясню понятно, без лишнего.";
   }
+  if (markDirty) markProfileDirty();
+}
+
+function paintStyle(style) {
+  setStyle(style || "short", false);
 }
 
 function paintProfileStats() {
-  document.querySelector("#stat-quizzes").textContent = String(state.profile.quizzes_done || 0);
-  document.querySelector("#stat-closed").textContent = String(state.profile.closed_errors || 0);
+  const quizzesDone = state.profile.quizzes_done || 0;
+  const closedErrors = state.profile.closed_errors || 0;
+  document.querySelector("#stat-quizzes").textContent = String(quizzesDone);
+  document.querySelector("#stat-quizzes-label").textContent = ruCount(quizzesDone, "квиз", "квиза", "квизов");
+  document.querySelector("#stat-closed").textContent = String(closedErrors);
+  document.querySelector("#stat-closed-label").textContent = ruCount(closedErrors, "ошибка закрыта", "ошибки закрыты", "ошибок закрыто");
   document.querySelector("#stat-accuracy").textContent = String(state.profile.accuracy || 0) + "%";
   const box = document.querySelector("#achievements");
   if (!box) return;
@@ -529,12 +657,120 @@ function fillProfileForm() {
   saveStatus.className = "status";
   paintProfileStats();
   previewFromForm();
+  savedProfile = profileSnapshot();
+  markProfileDirty();
+}
+
+function profileSnapshot() {
+  return JSON.stringify([
+    nameInput.value.trim(),
+    String(gradeInput.value || ""),
+    goalInput.value || "",
+    styleInput.value === "detail" ? "detail" : "short",
+    remindersInput.checked
+  ]);
+}
+
+function markProfileDirty() {
+  const dirty = profileSnapshot() !== savedProfile;
+  saveButton.disabled = !dirty;
+  if (dirty) saveButton.textContent = "Сохранить";
 }
 
 function renderInline(text) {
   return escapeHtml(text)
     .replace(/\*\*([^*\n]+)\*\*/g, "<b>$1</b>")
     .replace(/`([^`\n]+)`/g, '<span class="formula">$1</span>');
+}
+
+function splitLongParagraph(text) {
+  const cleaned = String(text || "").trim();
+  if (!cleaned || cleaned.includes("\n") || cleaned.length < 350) return [cleaned].filter(Boolean);
+  const parts = cleaned.split(/(?<=[.!?…])\s+(?=[А-ЯA-ZЁ])/);
+  const chunks = [];
+  let bucket = [];
+  parts.forEach((part) => {
+    bucket.push(part);
+    if (bucket.join(" ").length >= 180 || bucket.length >= 3) {
+      chunks.push(bucket.join(" "));
+      bucket = [];
+    }
+  });
+  if (bucket.length) chunks.push(bucket.join(" "));
+  return chunks;
+}
+
+function lineKind(line) {
+  const trimmed = String(line || "").trim();
+  if (!trimmed) return "blank";
+  if (/^`[^`]+`\s*$/.test(trimmed)) return "formula";
+  if (/^(Пример|Формула):\s*`[^`]+`\s*$/i.test(trimmed)) return "formula";
+  if (/^(Пример|Шаг\s*\d+|Ответ|Правило|Формула|Запомни):\s*/i.test(trimmed)) return "label";
+  if (/^(\d+[.)]|[-•])\s+/.test(trimmed)) return "list";
+  return "text";
+}
+
+function renderFormulaLine(line) {
+  const trimmed = String(line || "").trim();
+  const labeled = trimmed.match(/^(Пример|Формула):\s*`([^`]+)`\s*$/i);
+  if (labeled) {
+    return `<div class="formula-block"><span class="formula-label">${escapeHtml(labeled[1])}:</span> ${escapeHtml(labeled[2])}</div>`;
+  }
+  const plainFormula = trimmed.match(/^`([^`]+)`\s*$/);
+  if (plainFormula) {
+    return `<div class="formula-block">${escapeHtml(plainFormula[1])}</div>`;
+  }
+  return `<div class="formula-block">${renderInline(trimmed)}</div>`;
+}
+
+function renderLabeledLine(line) {
+  const trimmed = String(line || "").trim();
+  const match = trimmed.match(/^(Пример|Шаг\s*\d+|Ответ|Правило|Формула|Запомни):\s*(.*)$/i);
+  if (!match) return `<p>${renderInline(trimmed)}</p>`;
+  const rest = match[2] ? " " + renderInline(match[2]) : "";
+  return `<p><b>${escapeHtml(match[1])}:</b>${rest}</p>`;
+}
+
+function renderListGroup(lines) {
+  const ordered = /^(\d+[.)])\s+/.test(String(lines[0] || "").trim());
+  const tag = ordered ? "ol" : "ul";
+  const items = lines.map((line) => {
+    const text = String(line || "").trim().replace(/^(\d+[.)]|[-•])\s+/, "");
+    return `<li>${renderInline(text)}</li>`;
+  }).join("");
+  return `<${tag} class="note-list">${items}</${tag}>`;
+}
+
+function renderBlockLines(lines) {
+  const chunks = [];
+  let list = [];
+  const flushList = () => {
+    if (!list.length) return;
+    chunks.push(renderListGroup(list));
+    list = [];
+  };
+  lines.forEach((line) => {
+    const kind = lineKind(line);
+    if (kind === "list") {
+      list.push(line);
+      return;
+    }
+    flushList();
+    if (kind === "blank") return;
+    if (kind === "formula") {
+      chunks.push(renderFormulaLine(line));
+      return;
+    }
+    if (kind === "label") {
+      chunks.push(renderLabeledLine(line));
+      return;
+    }
+    splitLongParagraph(line).forEach((part) => {
+      chunks.push(`<p>${renderInline(part)}</p>`);
+    });
+  });
+  flushList();
+  return chunks.join("");
 }
 
 function renderNoteBody(body) {
@@ -554,9 +790,15 @@ function renderNoteBody(body) {
   });
   if (title || lines.length) blocks.push({ title, lines });
   return blocks.map((block) => {
-    const html = renderInline(block.lines.join("\n")).replace(/\n{2,}/g, "</p><p>").replace(/\n/g, "<br>");
-    const heading = block.title ? `<strong>${escapeHtml(block.title)}</strong>` : "";
-    return `<div class="note-block">${heading}<p>${html}</p></div>`;
+    if (block.title === "Приём") {
+      const skill = plain(block.lines.join(" "));
+      if (!skill) return "";
+      return `<div class="note-skill"><span aria-hidden="true">💡</span><strong>${escapeHtml(skill)}</strong></div>`;
+    }
+    const content = renderBlockLines(block.lines);
+    if (!content && !block.title) return "";
+    const heading = block.title ? `<h3>${escapeHtml(block.title)}</h3>` : "";
+    return `<div class="note-block">${heading}${content || "<p></p>"}</div>`;
   }).join("");
 }
 
@@ -573,17 +815,33 @@ async function openNote(id, back) {
   state.noteReturn = back;
   const response = await fetch("/api/notes/" + encodeURIComponent(id));
   if (ticket !== noteTicket) return;
-  if (response.status === 401) return showGate(LOCKED);
+  if (locked(response)) return;
   if (!response.ok) return;
   const note = await response.json();
   currentNote = note;
   document.querySelector("#note-form").hidden = true;
   document.querySelector("#note-body").hidden = false;
   document.querySelector("#edit-note").hidden = false;
-  document.querySelector("#note-title").textContent = note.title || "Конспект";
-  document.querySelector("#note-meta").textContent = metaLine(note.subject);
+  document.querySelector("#note-actions").hidden = false;
+  paintNoteHead(note);
   document.querySelector("#note-body").innerHTML = renderNoteBody(note.body || "");
   showScreen("note");
+}
+
+function sourceLabel(source) {
+  if (source === "photo") return "по фото";
+  if (source === "chat") return "из чата";
+  if (source === "manual") return "свой";
+  return "";
+}
+
+function paintNoteHead(note) {
+  document.querySelector("#note-title").textContent = note.title || "Конспект";
+  const parts = [noteSubject(note), shortDate(note.created_at), sourceLabel(note.source)].filter(Boolean);
+  document.querySelector("#note-meta").textContent = parts.join(" · ");
+  const stored = state.notes.find((item) => String(item.id) === String(note.id));
+  const pinned = stored ? Boolean(stored.pinned) : Boolean(note.pinned);
+  document.querySelector("#note-pin").textContent = pinned ? "Открепить" : "Закрепить";
 }
 
 function openNotes() {
@@ -600,6 +858,7 @@ function openTopicQuiz(from) {
 function openProfile() {
   fillProfileForm();
   showScreen("profile");
+  refreshProfile().catch(() => {});
 }
 
 function errorStatusLabel(status) {
@@ -645,18 +904,39 @@ function paintErrorBank() {
     const topic = row.skill || row.mistake || "";
     const meta = [row.subject || "Предмет", topic].filter(Boolean).join(" · ");
     const bars = [0, 1, 2].map((index) => `<i class="${index < progress ? "on" : ""}"></i>`).join("");
-    return `<article class="error-card">
+    const source = row.source === "quiz"
+      ? `<span class="tag-source tag-quiz">Из квиза</span>`
+      : `<span class="tag-source tag-chat">Из чата</span>`;
+    const open = String(row.id) === String(openErrorId);
+    const train = row.status === "closed"
+      ? `<p class="error-closed-note">Закреплена: три верных ответа подряд.</p>`
+      : `<button type="button" class="error-train" data-train>Потренировать</button>`;
+    const mistake = row.mistake && row.mistake !== row.skill
+      ? `<p class="error-detail"><b>Где споткнулся:</b> ${renderInline(row.mistake)}</p>`
+      : "";
+    return `<article class="error-card${open ? " open" : ""}" data-error="${escapeHtml(row.id)}" tabindex="0" role="button" aria-expanded="${open ? "true" : "false"}">
       <div class="error-card-top">
         <span class="error-card-meta">${escapeHtml(meta)}</span>
         <span class="error-status ${escapeHtml(row.status || "new")}">${escapeHtml(errorStatusLabel(row.status))}</span>
       </div>
-      <p class="error-card-q">${escapeHtml(row.problem || row.mistake || "Ошибка")}</p>
+      <p class="error-card-q">${renderInline(row.problem || row.mistake || "Ошибка")}</p>
+      ${source}
       <div class="error-progress">
         <div class="error-bars" aria-hidden="true">${bars}</div>
         <span>${progress} из 3 верных</span>
       </div>
+      <div class="error-more"${open ? "" : " hidden"}>
+        ${mistake}
+        ${train}
+      </div>
     </article>`;
   }).join("");
+}
+
+function toggleErrorCard(card) {
+  const id = card.dataset.error;
+  openErrorId = String(openErrorId) === id ? null : id;
+  paintErrorBank();
 }
 
 async function openErrors(from) {
@@ -670,7 +950,7 @@ async function openErrors(from) {
   status.textContent = "";
   const response = await fetch("/api/errors");
   if (ticket !== errorsTicket) return;
-  if (response.status === 401) return showGate(LOCKED);
+  if (locked(response)) return;
   if (!response.ok) {
     document.querySelector("#error-list").innerHTML = "";
     status.className = "status error";
@@ -701,7 +981,7 @@ function promptHtml(prompt) {
 
 function topicList(items) {
   if (!items || !items.length) return "—";
-  return items.map((item) => escapeHtml(item)).join(", ");
+  return items.map((item) => renderInline(item)).join(", ");
 }
 
 function paintQuizResults() {
@@ -710,24 +990,34 @@ function paintQuizResults() {
   const total = Number(summary.total || quiz.total || 0);
   const review = summary.review || [];
   const perfect = !review.length && correct >= total && total > 0;
+  document.querySelector("#result-mascot").src = "/static/lumi-happy.png";
+  const time = document.querySelector("#result-time");
+  time.hidden = !quiz.elapsed;
+  time.textContent = quiz.elapsed ? "Время: " + quiz.elapsed : "";
   document.querySelector("#result-score").textContent = correct + "/" + total;
   document.querySelector("#result-title").textContent = perfect
     ? "Супер! Все ответы с первой попытки."
     : "Не страшно — ошибки уже в банке, разберём их вместе.";
   document.querySelector("#result-strong").innerHTML = topicList(summary.strong);
   document.querySelector("#result-review").innerHTML = topicList(review);
-  document.querySelector("#result-advice").textContent = summary.advice
+  document.querySelector("#result-advice").innerHTML = renderInline(summary.advice
     || (perfect
       ? "Отлично! Можно взять новую тему."
-      : "Рекомендую пройти квиз по ошибкам через день.");
+      : "Рекомендую пройти квиз по ошибкам через день."));
   document.querySelector("#quiz-retry").hidden = !review.length;
+}
+
+function quizKicker() {
+  if (quiz && quiz.kind === "errors") return "Тренировка";
+  if (quiz && quiz.noteId != null) return "Квиз по конспекту";
+  return "Квиз по теме";
 }
 
 function paintQuiz() {
   const live = document.querySelector("#quiz-live");
   const results = document.querySelector("#quiz-results");
   const button = document.querySelector("#quiz-go");
-  document.querySelector("#quiz-kicker").textContent = quiz && quiz.kind === "errors" ? "Тренировка" : quiz && quiz.kind === "review" ? "Повторение" : "Квиз по конспектам";
+  document.querySelector("#quiz-kicker").textContent = quizKicker();
   document.querySelector("#quiz-title").textContent = quiz && quiz.title ? quiz.title : "Квиз";
   if (quiz && quiz.showResults) {
     live.hidden = true;
@@ -758,11 +1048,14 @@ function paintQuiz() {
     return;
   }
   const total = quiz.total || (quiz.shown.options || []).length || 1;
-  const number = quiz.number || 1;
+  const number = Math.min(quiz.number || 1, total);
+  const done = Number(quiz.done || 0);
   progress.hidden = false;
   bar.hidden = false;
-  progress.textContent = number + "/" + total;
-  fill.style.width = Math.min(100, Math.round((number / total) * 100)) + "%";
+  progress.textContent = quiz.shown.retry
+    ? "Ещё раз · решено " + done + " из " + total
+    : "Вопрос " + number + " из " + total;
+  fill.style.width = Math.min(100, Math.round((done / total) * 100)) + "%";
   heading.hidden = false;
   card.innerHTML = promptHtml(quiz.shown.prompt);
   const correctIndex = quiz.feedback && Number.isInteger(quiz.feedback.correct_index)
@@ -794,10 +1087,9 @@ function paintQuiz() {
     document.querySelector("#coach-title").textContent = quiz.feedback.correct
       ? "Верно! 🎉"
       : "Почти! Давай разберём";
-    document.querySelector("#coach-text").textContent = quiz.feedback.explanation || "";
+    document.querySelector("#coach-text").innerHTML = renderInline(quiz.feedback.explanation || "");
     button.textContent = quiz.finished ? "Результаты →" : "Дальше →";
     button.disabled = Boolean(quiz.busy);
-    fill.style.width = "100%";
     return;
   }
   feedback.hidden = true;
@@ -807,7 +1099,7 @@ function paintQuiz() {
   button.disabled = quiz.picked == null || Boolean(quiz.busy);
 }
 
-function beginQuiz(kind, data, fallback, token) {
+function beginQuiz(kind, data, fallback, token, extra = {}) {
   state.quizKind = kind;
   const question = data.question || null;
   quiz = {
@@ -815,7 +1107,7 @@ function beginQuiz(kind, data, fallback, token) {
     kind,
     title: data.title || fallback || "Квиз",
     total: data.total || 0,
-    number: (data.done || 0) + 1,
+    number: (data.asked || 0) + 1,
     done: data.done || 0,
     shown: question,
     picked: null,
@@ -827,8 +1119,9 @@ function beginQuiz(kind, data, fallback, token) {
     busy: false,
     misses: data.misses || [],
     elapsed: data.elapsed || "",
-    star: data.star || "",
-    skillIds: data.skill_ids || []
+    skillIds: data.skill_ids || [],
+    noteId: null,
+    ...extra
   };
   document.querySelector("#quiz-status").textContent = "";
   document.querySelector("#quiz-status").className = "status";
@@ -843,10 +1136,16 @@ async function startSetupQuiz() {
   const subject = subjectById(state.quizPick.subject);
   const count = state.quizPick.count === 10 ? 10 : 5;
   const note = state.notes.find((item) => String(item.id) === String(state.quizPick.noteId));
+  const custom = state.quizPick.noteId === CUSTOM_TOPIC ? document.querySelector("#custom-topic").value.trim() : "";
+  if (state.quizPick.noteId === CUSTOM_TOPIC && custom.length < 2) {
+    status.className = "status error";
+    status.textContent = "Напиши тему, например: квадратные уравнения.";
+    return;
+  }
   const setup = { subject: subject.id, noteId: note ? note.id : null, count };
   let url = "/api/quizzes/topic";
-  let body = JSON.stringify({ topic: subject.label, count });
-  let fallback = subject.label;
+  let body = JSON.stringify({ topic: custom ? subject.label + ": " + custom : subject.label, count });
+  let fallback = custom || subject.label;
   if (note) {
     state.selectedNoteId = note.id;
     fallback = note.title || fallback;
@@ -856,31 +1155,40 @@ async function startSetupQuiz() {
   button.disabled = true;
   status.className = "status";
   status.textContent = "";
+  state.loadingFrom = "quiz";
   showScreen("quiz-loading");
   try {
     const response = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body });
     const data = await response.json().catch(() => ({}));
     if (token !== quizToken) return;
-    if (response.status === 401) return showGate(LOCKED);
+    if (locked(response)) return;
     if (!response.ok) {
       showScreen("quiz");
+      const message = detailText(data, "Квиз не собрался. Попробуй ещё раз через минуту.");
       status.className = "status error";
-      status.textContent = detailText(data, "Квиз не собрался.");
+      status.textContent = message;
+      showToast(message);
       return;
     }
-    beginQuiz("topic", data, fallback, token);
-    quiz.setup = setup;
-    quiz.noteId = note ? note.id : null;
+    beginQuiz("topic", data, fallback, token, { setup, noteId: note ? note.id : null });
+  } catch (error) {
+    if (token !== quizToken) return;
+    showScreen("quiz");
+    const message = "Не удалось дождаться квиза. Попробуй ещё раз.";
+    status.className = "status error";
+    status.textContent = message;
+    showToast(message);
+    throw error;
   } finally {
     if (token === quizToken) button.disabled = false;
   }
 }
 
-async function startQuiz(kind, extra) {
+async function startQuiz(kind) {
   const token = ++quizToken;
-  const button = document.querySelector(kind === "topic" ? "#start-topic" : kind === "errors" ? "#start-errors" : "#ignite");
-  const status = document.querySelector(kind === "topic" ? "#topic-status" : kind === "errors" ? "#error-status" : "#sky-status");
-  let fallback = kind === "errors" ? "Квиз по ошибкам" : kind === "review" ? "Повторение" : "Квиз";
+  const button = document.querySelector(kind === "topic" ? "#start-topic" : "#start-errors");
+  const status = document.querySelector(kind === "topic" ? "#topic-status" : "#error-status");
+  let fallback = kind === "errors" ? "Квиз по ошибкам" : "Квиз";
   let url = "/api/quizzes/errors";
   let body = "{}";
   if (kind === "topic") {
@@ -893,36 +1201,34 @@ async function startQuiz(kind, extra) {
     fallback = note.title || fallback;
     url = "/api/quizzes/note/" + encodeURIComponent(note.id);
   }
-  if (kind === "review") {
-    url = "/api/quizzes/review";
-    body = JSON.stringify(extra && extra.skillId ? { skill_id: extra.skillId } : {});
-  }
   if (button) button.disabled = true;
   if (status) {
     status.className = "status";
     status.textContent = "";
   }
+  const origin = state.screen === "quiz-play" || state.screen === "quiz-loading" ? quizOrigin() : state.screen;
+  state.loadingFrom = origin;
   showScreen("quiz-loading");
   try {
     const response = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body });
     const data = await response.json().catch(() => ({}));
     if (token !== quizToken) return;
-    if (response.status === 401) return showGate(LOCKED);
+    if (locked(response)) return;
     if (!response.ok) {
-      showScreen(kind === "review" ? "sky" : kind === "errors" ? "quiz-errors" : "quiz");
+      showScreen(origin);
+      const message = detailText(data, "Квиз не собрался.");
       if (status) {
         status.className = "status error";
-        status.textContent = detailText(data, "Квиз не собрался.");
+        status.textContent = message;
       }
+      showToast(message);
       return;
     }
-    beginQuiz(kind, data, fallback, token);
-    if (kind === "topic") quiz.noteId = state.selectedNoteId;
+    beginQuiz(kind, data, fallback, token, { noteId: kind === "topic" ? state.selectedNoteId : null, origin });
   } finally {
     if (token === quizToken && button) {
       if (kind === "topic") button.disabled = state.selectedNoteId == null;
-      else if (kind === "errors") button.disabled = !state.errors.length;
-      else button.disabled = !(state.sky && state.sky.summary && state.sky.summary.dim);
+      else button.disabled = !state.errors.filter((row) => row.status !== "closed").length;
     }
   }
 }
@@ -939,7 +1245,7 @@ function advanceQuiz() {
     return;
   }
   quiz.shown = next.question;
-  quiz.number = (next.done || 0) + 1;
+  quiz.number = (next.asked || 0) + 1;
   quiz.total = next.total || quiz.total;
   quiz.title = next.title || quiz.title;
   quiz.feedback = null;
@@ -964,7 +1270,7 @@ async function submitAnswer() {
     });
     const data = await response.json().catch(() => ({}));
     if (!quiz || quiz.token !== token) return;
-    if (response.status === 401) return showGate(LOCKED);
+    if (locked(response)) return;
     if (!response.ok) {
       status.className = "status error";
       status.textContent = detailText(data, "Ответ не принят.");
@@ -978,13 +1284,16 @@ async function submitAnswer() {
     quiz.done = data.done;
     quiz.total = data.total || quiz.total;
     quiz.elapsed = data.elapsed || quiz.elapsed;
-    quiz.star = data.star || quiz.star;
     quiz.misses = data.misses || [];
     quiz.summary = data.summary || quiz.summary || null;
     quiz.showResults = false;
     if (data.skill_id) quiz.skillIds = [data.skill_id].concat(quiz.skillIds || []);
     if (data.title) quiz.title = data.title;
     haptic(data.feedback && data.feedback.correct ? "ok" : "bad");
+    if (quiz.finished) {
+      refreshProfile().catch(() => {});
+      refreshHome().catch(() => {});
+    }
   } finally {
     if (quiz && quiz.token === token) {
       quiz.busy = false;
@@ -993,109 +1302,24 @@ async function submitAnswer() {
   }
 }
 
-function starWord(count) {
-  const mod10 = count % 10;
-  const mod100 = count % 100;
-  if (mod10 === 1 && mod100 !== 11) return "звезда";
-  if (mod10 >= 2 && mod10 <= 4 && (mod100 < 12 || mod100 > 14)) return "звезды";
-  return "звёзд";
-}
-
-function paintSkyEntry() {
-  const line = document.querySelector("#home-sky-line");
-  if (!line) return;
-  const sky = state.sky;
-  if (!sky || !sky.summary || !sky.summary.total) {
-    line.textContent = "Появится после первой проверенной задачи";
-    return;
-  }
-  const dim = sky.summary.dim || 0;
-  const total = sky.summary.total;
-  line.textContent = dim
-    ? "На небе " + total + " " + starWord(total) + ", " + dim + " пора повторить"
-    : "На небе " + total + " " + starWord(total);
-}
-
-function paintSky() {
-  const summary = document.querySelector("#sky-summary");
-  const empty = document.querySelector("#sky-empty");
-  const canvas = document.querySelector("#sky-canvas");
-  const ignite = document.querySelector("#ignite");
-  const sky = state.sky;
-  const igniteIds = JSON.parse(sessionStorage.getItem("lumi-ignite") || "[]").map(String);
-  sessionStorage.removeItem("lumi-ignite");
-  paintSkyEntry();
-  if (!sky || !sky.summary || !sky.summary.total) {
-    summary.textContent = "Каждый навык — звезда. Она зажжётся после первой задачи.";
-    empty.hidden = false;
-    canvas.innerHTML = "";
-    ignite.hidden = true;
-    return;
-  }
-  empty.hidden = true;
-  const dim = sky.summary.dim || 0;
-  summary.textContent = dim
-    ? "Горит " + sky.summary.bright + ", пора повторить " + dim + ". Нажми на звезду, чтобы открыть навык."
-    : "Все " + sky.summary.bright + " горят. Нажми на звезду, чтобы открыть навык.";
-  ignite.hidden = dim === 0;
-  ignite.textContent = "Зажечь тусклые звёзды" + (dim ? " (" + dim + ")" : "");
-  canvas.innerHTML = (sky.constellations || []).map((group) => {
-    const stars = group.stars || [];
-    const nodes = stars.map((star) => {
-      const klass = igniteIds.includes(String(star.id)) ? "ignite" : star.dim ? "" : "bright";
-      return `<button type="button" class="star-node" data-star="${star.id}">
-        <span class="star-glow ${klass}"></span>
-        <span class="star-name">${escapeHtml(star.name || "Навык")}</span>
-      </button>`;
-    }).join("");
-    const rowClass = stars.length < 2 ? "orbit-row solo" : "orbit-row";
-    return `<section class="constellation"><h2>${escapeHtml(group.subject || "Предмет")}</h2><div class="${rowClass}">${nodes}</div></section>`;
-  }).join("");
-}
-
-async function loadSky() {
-  const response = await fetch("/api/sky");
-  if (response.status === 401) return showGate(LOCKED);
-  if (!response.ok) return;
-  state.sky = await response.json();
-  paintSky();
-}
-
-async function openStar(id) {
-  const response = await fetch("/api/skills/" + encodeURIComponent(id));
-  if (response.status === 401) return showGate(LOCKED);
-  if (!response.ok) return;
-  const star = await response.json();
-  state.star = star;
-  document.querySelector("#star-name").textContent = star.name || "Звезда";
-  const percent = Math.round(Number(star.brightness || 0) * 100);
-  document.querySelector("#star-meta").textContent = (star.subject || "Предмет") + " · владение " + percent + "%";
-  const notes = document.querySelector("#star-notes");
-  notes.innerHTML = (star.notes || []).slice(0, 1).map((note) => `<p>Конспект: ${escapeHtml(note.title)}</p>`).join("");
-  const noteButton = document.querySelector("#star-note");
-  noteButton.hidden = !(star.notes && star.notes.length);
-  document.querySelector("#star-sheet").hidden = false;
-}
-
 async function loadCabinet() {
   const profileResponse = await fetch("/api/profile");
-  if (profileResponse.status === 401) return showGate(LOCKED);
+  if (locked(profileResponse)) return;
   if (!profileResponse.ok) return showGate("Кабинет не смог открыть базу.");
   state.profile = await profileResponse.json();
   const notesResponse = await fetch("/api/notes");
-  if (notesResponse.status === 401) return showGate(LOCKED);
+  if (locked(notesResponse)) return;
   if (!notesResponse.ok) return showGate("Кабинет не смог открыть базу.");
   const notesPayload = await notesResponse.json();
   state.notes = notesPayload.notes || [];
   const homeResponse = await fetch("/api/home");
-  if (homeResponse.status === 401) return showGate(LOCKED);
+  if (locked(homeResponse)) return;
   if (homeResponse.ok) state.home = await homeResponse.json();
   state.selectedNoteId = null;
   paintHome();
   paintNotes();
   paintTopics();
   showCabinet();
-  await loadSky();
   showScreen("home");
 }
 
@@ -1142,13 +1366,18 @@ async function deleteNote(id) {
   deletingNotes.add(key);
   try {
     const response = await fetch("/api/notes/" + encodeURIComponent(key), { method: "DELETE" });
-    if (response.status === 401) return showGate(LOCKED);
+    if (locked(response)) return;
     if (!response.ok && response.status !== 404) return closeSwipes();
     state.notes = state.notes.filter((note) => String(note.id) !== key);
     if (String(state.selectedNoteId) === key) state.selectedNoteId = null;
     paintHome();
     paintNotes();
     paintTopics();
+    refreshHome().catch(() => {});
+    if (state.screen === "note" && currentNote && String(currentNote.id) === key) {
+      currentNote = null;
+      showScreen(state.noteReturn || "notes");
+    }
   } catch {
     closeSwipes();
   } finally {
@@ -1168,13 +1397,14 @@ async function pinNote(id) {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ pinned })
     });
-    if (response.status === 401) return showGate(LOCKED);
+    if (locked(response)) return;
     if (!response.ok) return closeSwipes();
     note.pinned = pinned;
     sortNotes();
     paintHome();
     paintNotes();
     paintTopics();
+    if (currentNote && String(currentNote.id) === key) paintNoteHead(currentNote);
   } catch {
     closeSwipes();
   } finally {
@@ -1266,7 +1496,7 @@ document.querySelectorAll("[data-back]").forEach((button) => {
       }
       showScreen(state.noteReturn || "notes");
     }
-    else if (target === "quiz-origin") showScreen(state.quizKind === "errors" ? "quiz-errors" : state.quizKind === "review" ? "sky" : "quiz");
+    else if (target === "quiz-origin") showScreen(quizOrigin());
     else if (target === "quiz-return") showScreen(state.quizReturn || "home");
     else if (target === "notes") openNotes();
     else showScreen(target);
@@ -1296,7 +1526,9 @@ document.querySelector("#topic-chips").addEventListener("click", (event) => {
   if (!button) return;
   state.quizPick.noteId = button.dataset.topic || null;
   paintQuizSetup();
+  if (state.quizPick.noteId === CUSTOM_TOPIC) document.querySelector("#custom-topic").focus();
 });
+clearStatusOnInput("#custom-topic", "#setup-status");
 document.querySelector("#count-chips").addEventListener("click", (event) => {
   const button = event.target.closest("[data-count]");
   if (!button) return;
@@ -1307,7 +1539,7 @@ document.querySelector("#quiz-error-card").addEventListener("click", () => {
   const status = document.querySelector("#setup-status");
   if (!Number(state.home.open_errors || 0)) {
     status.className = "status error";
-    status.textContent = "Сначала пришли решение с ошибкой — тогда соберу квиз.";
+    status.textContent = "Сначала пройди квиз или пришли решение на проверку.";
     return;
   }
   status.textContent = "";
@@ -1321,26 +1553,45 @@ document.querySelectorAll("[data-quick]").forEach((button) => {
     const action = button.dataset.quick;
     if (action === "quiz-topic") showScreen("quiz");
     else if (action === "quiz-errors") openErrors("home").catch(() => showGate("Кабинет не смог открыть базу."));
-    else if (action === "note-new") {
-      document.querySelector("#new-note-input").value = "";
-      document.querySelector("#new-note-status").textContent = "";
-      showScreen("note-new");
-    } else if (action === "ask") {
-      const app = bridge();
-      if (app && app.close) app.close();
+    else if (action === "note-new") openNewNote();
+    else if (action === "ask") {
+      backToChat("Открываю чат — напиши Люми задачу.");
     }
   });
 });
-document.querySelector("#notes-new").addEventListener("click", () => {
+function openNewNote() {
+  document.querySelector("#new-note-title").value = "";
   document.querySelector("#new-note-input").value = "";
   document.querySelector("#new-note-status").textContent = "";
+  document.querySelector("#new-note-status").className = "status";
+  const filter = state.notesFilter || "";
+  paintSubjectPicks(document.querySelector("#new-note-subject"), filter.startsWith("s:") ? filter.slice(2) : "Другое");
   showScreen("note-new");
-});
+}
+
+bindSubjectPicks(document.querySelector("#new-note-subject"));
+bindSubjectPicks(document.querySelector("#note-subject-picks"));
+document.querySelector("#notes-new").addEventListener("click", openNewNote);
 document.querySelector("#notes-filters").addEventListener("click", (event) => {
   const chip = event.target.closest("[data-notes-filter]");
   if (!chip) return;
   state.notesFilter = chip.dataset.notesFilter || "all";
   paintNotes();
+});
+document.querySelector("#error-list").addEventListener("click", (event) => {
+  if (event.target.closest("[data-train]")) {
+    startQuiz("errors").catch(() => showGate("Кабинет не смог открыть базу."));
+    return;
+  }
+  const card = event.target.closest("[data-error]");
+  if (card) toggleErrorCard(card);
+});
+document.querySelector("#error-list").addEventListener("keydown", (event) => {
+  if (event.key !== "Enter" && event.key !== " ") return;
+  const card = event.target.closest("[data-error]");
+  if (!card || event.target !== card) return;
+  event.preventDefault();
+  toggleErrorCard(card);
 });
 document.querySelector("#error-filters").addEventListener("click", (event) => {
   const chip = event.target.closest("[data-errors-filter]");
@@ -1366,10 +1617,14 @@ document.querySelector("#new-note-form").addEventListener("submit", async (event
     const response = await fetch("/api/notes", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ text })
+      body: JSON.stringify({
+        text,
+        title: document.querySelector("#new-note-title").value.trim(),
+        subject: document.querySelector("#new-note-subject").dataset.value || ""
+      })
     });
     const data = await response.json().catch(() => ({}));
-    if (response.status === 401) return showGate(LOCKED);
+    if (locked(response)) return;
     if (!response.ok) {
       status.className = "status error";
       status.textContent = detailText(data, "Не удалось сохранить.");
@@ -1385,8 +1640,12 @@ document.querySelector("#new-note-form").addEventListener("submit", async (event
       created_at: data.created_at
     });
     sortNotes();
+    if (state.notesFilter && state.notesFilter !== "all" && state.notesFilter !== "s:" + data.subject) {
+      state.notesFilter = "s:" + data.subject;
+    }
     paintNotes();
     paintTopics();
+    refreshHome().catch(() => {});
     showScreen("notes");
   } finally {
     button.disabled = false;
@@ -1402,29 +1661,73 @@ document.querySelector("#search-hits").addEventListener("click", (event) => {
   if (!card) return;
   openNote(card.dataset.note, "notes").catch(() => showGate("Кабинет не смог открыть базу."));
 });
+const SEARCH_EMPTY = "Ничего не нашлось. Попробуй другое слово из конспекта.";
+const SEARCH_FAILED = "Поиск сейчас не работает. Попробуй чуть позже.";
+let searchTimer = null;
+
+function setSearching(on) {
+  document.querySelector("#notes-list").hidden = on;
+  document.querySelector("#notes-filters").hidden = on || state.notes.length === 0;
+  document.querySelector("#search-hits").hidden = !on;
+}
+
+function searchHead(text, semantic) {
+  const badge = semantic ? `<span class="search-badge">по смыслу</span>` : "";
+  return `<div class="search-head"><span>${escapeHtml(text)}</span>${badge}</div>`;
+}
+
+function paintSearchHits(hits, query) {
+  const box = document.querySelector("#search-hits");
+  if (!hits.length) {
+    box.innerHTML = searchHead("Поиск: «" + query + "»", false) + `<p class="empty">${escapeHtml(SEARCH_EMPTY)}</p>`;
+    return;
+  }
+  const count = hits.length + " " + ruCount(hits.length, "конспект", "конспекта", "конспектов");
+  box.innerHTML = searchHead("Нашлось " + count, hits.some((hit) => hit.semantic)) + hits.map((hit) => `
+    <button type="button" class="card" data-note="${escapeHtml(hit.id)}">
+      <span class="note-mark" aria-hidden="true">${escapeHtml(subjectMark(hit.subject))}</span>
+      <span class="copy">
+        <h3>${escapeHtml(hit.title || "Конспект")}</h3>
+        <span class="meta">${escapeHtml(noteSubject(hit))}</span>
+        <span class="preview hit">${highlight(hit.snippet || "", query)}</span>
+      </span>
+      ${CHEV}
+    </button>
+  `).join("");
+}
+
+async function runSearch(query, ticket) {
+  const box = document.querySelector("#search-hits");
+  const response = await fetch("/api/search?q=" + encodeURIComponent(query));
+  if (ticket !== searchTicket) return;
+  if (locked(response)) return;
+  const data = await response.json().catch(() => null);
+  if (ticket !== searchTicket) return;
+  if (!response.ok) {
+    box.innerHTML = searchHead("Поиск: «" + query + "»", false)
+      + `<p class="empty">${escapeHtml(detailText(data, SEARCH_FAILED))}</p>`;
+    return;
+  }
+  paintSearchHits(Array.isArray(data) ? data : [], query);
+}
+
 document.querySelector("#search-input").addEventListener("input", () => {
   const ticket = ++searchTicket;
   const query = document.querySelector("#search-input").value.trim();
-  const box = document.querySelector("#search-hits");
+  clearTimeout(searchTimer);
   if (!query) {
-    box.innerHTML = "";
+    document.querySelector("#search-hits").innerHTML = "";
+    setSearching(false);
     return;
   }
-  fetch("/api/search?q=" + encodeURIComponent(query)).then(async (response) => {
-    if (ticket !== searchTicket) return;
-    if (response.status === 401) return showGate(LOCKED);
-    if (!response.ok) return;
-    const hits = await response.json();
-    box.innerHTML = (hits || []).map((hit) => `
-      <button type="button" class="card plain" data-note="${escapeHtml(hit.id)}">
-        <span class="icon">${BOOK}</span>
-        <span class="copy">
-          <h3>${escapeHtml(hit.title || "Конспект")}</h3>
-          <span class="preview hit">${highlight(hit.snippet || "", query)}</span>
-        </span>
-      </button>
-    `).join("") || `<p class="empty">Ничего не нашлось.</p>`;
-  }).catch(() => showGate("Кабинет не смог открыть базу."));
+  setSearching(true);
+  document.querySelector("#search-hits").innerHTML = searchHead("Ищу…", false);
+  searchTimer = setTimeout(() => {
+    runSearch(query, ticket).catch(() => {
+      if (ticket !== searchTicket) return;
+      document.querySelector("#search-hits").innerHTML = `<p class="empty">${escapeHtml(SEARCH_FAILED)}</p>`;
+    });
+  }, 300);
 });
 document.querySelector("#topic-list").addEventListener("click", (event) => {
   const card = event.target.closest("[data-select]");
@@ -1434,7 +1737,6 @@ document.querySelector("#topic-list").addEventListener("click", (event) => {
 });
 document.querySelector("#start-topic").addEventListener("click", () => startQuiz("topic").catch(() => showGate("Кабинет не смог открыть базу.")));
 document.querySelector("#start-errors").addEventListener("click", () => startQuiz("errors").catch(() => showGate("Кабинет не смог открыть базу.")));
-document.querySelector("#ignite").addEventListener("click", () => startQuiz("review").catch(() => showGate("Кабинет не смог открыть базу.")));
 document.querySelector("#quiz-options").addEventListener("click", (event) => {
   const button = event.target.closest("[data-option]");
   if (!button || !quiz || quiz.feedback || quiz.busy) return;
@@ -1455,46 +1757,18 @@ document.querySelector("#quiz-again").addEventListener("click", () => {
   if (!quiz) return;
   if (quiz.setup) startSetupQuiz().catch(() => showGate("Кабинет не смог открыть базу."));
   else if (quiz.kind === "topic") startQuiz("topic").catch(() => showGate("Кабинет не смог открыть базу."));
-  else if (quiz.kind === "errors") startQuiz("errors").catch(() => showGate("Кабинет не смог открыть базу."));
-  else startQuiz("review").catch(() => showGate("Кабинет не смог открыть базу."));
+  else startQuiz("errors").catch(() => showGate("Кабинет не смог открыть базу."));
 });
+document.querySelector("#quiz-cancel").addEventListener("click", cancelQuizLoading);
 document.querySelector("#quiz-retry").addEventListener("click", () => startQuiz("errors").catch(() => showGate("Кабинет не смог открыть базу.")));
 document.querySelector("#quiz-chat").addEventListener("click", () => {
-  const app = webApp();
-  if (app && app.close) app.close();
-});
-document.querySelector("#sky-canvas").addEventListener("click", (event) => {
-  const star = event.target.closest("[data-star]");
-  if (!star) return;
-  openStar(star.dataset.star).catch(() => showGate("Кабинет не смог открыть базу."));
-});
-document.querySelector("#star-close").addEventListener("click", closeStar);
-document.querySelector("#star-sheet").addEventListener("click", (event) => {
-  if (event.target.id === "star-sheet") closeStar();
-});
-document.querySelector("#star-train").addEventListener("click", () => {
-  const skillId = state.star ? state.star.id : null;
-  closeStar();
-  startQuiz("review", { skillId }).catch(() => showGate("Кабинет не смог открыть базу."));
-});
-document.querySelector("#star-note").addEventListener("click", () => {
-  const note = state.star && state.star.notes && state.star.notes[0];
-  closeStar();
-  if (note) openNote(note.id, "sky").catch(() => showGate("Кабинет не смог открыть базу."));
-});
-document.querySelector("#share-sky").addEventListener("click", async () => {
-  const summary = document.querySelector("#sky-summary").textContent || "Моё небо в Люми";
-  const app = bridge();
-  if (navigator.share) {
-    try { await navigator.share({ title: "Небо Люми", text: summary }); } catch (error) { /* user closed share */ }
-    return;
-  }
-  if (app && app.shareUrl) app.shareUrl(summary);
+  backToChat("Открываю чат — спроси Люми про трудный вопрос.");
 });
 nameInput.addEventListener("input", () => {
-  if (saveButton.textContent !== "Сохранить") saveButton.textContent = "Сохранить";
   previewFromForm();
+  markProfileDirty();
 });
+remindersInput.addEventListener("change", markProfileDirty);
 document.querySelector("#grade-row").addEventListener("click", (event) => {
   const button = event.target.closest("[data-grade]");
   if (!button) return;
@@ -1505,17 +1779,13 @@ document.querySelector("#goal-row").addEventListener("click", (event) => {
   if (!button) return;
   setGoal(button.dataset.goal, true);
 });
-styleSlider.addEventListener("input", () => {
-  const style = styleSlider.value === "1" ? "detail" : "short";
-  paintStyle(style);
-  state.profile.explain_style = style;
-  if (saveButton.textContent !== "Сохранить") saveButton.textContent = "Сохранить";
+document.querySelector("#style-row").addEventListener("click", (event) => {
+  const button = event.target.closest("[data-style]");
+  if (!button) return;
+  setStyle(button.dataset.style, true);
 });
 document.addEventListener("keydown", (event) => {
-  if (event.key === "Escape") {
-    closeConfirm();
-    closeStar();
-  }
+  if (event.key === "Escape") closeConfirm();
 });
 document.querySelector("#confirm-cancel").addEventListener("click", closeConfirm);
 document.querySelector("#confirm-ok").addEventListener("click", () => {
@@ -1528,11 +1798,14 @@ document.querySelector("#confirm-delete").addEventListener("click", (event) => {
 });
 function beginNoteEdit() {
   if (!currentNote) return;
+  document.querySelector("#note-title-input").value = currentNote.title || "";
+  paintSubjectPicks(document.querySelector("#note-subject-picks"), noteSubject(currentNote), noteSubject(currentNote));
   document.querySelector("#note-body-input").value = currentNote.body || "";
   document.querySelector("#note-status").textContent = "";
   document.querySelector("#note-status").className = "status";
   document.querySelector("#note-body").hidden = true;
   document.querySelector("#edit-note").hidden = true;
+  document.querySelector("#note-actions").hidden = true;
   document.querySelector("#note-form").hidden = false;
   document.querySelector("#note-body-input").focus();
 }
@@ -1541,9 +1814,36 @@ function cancelNoteEdit() {
   document.querySelector("#note-form").hidden = true;
   document.querySelector("#note-body").hidden = false;
   document.querySelector("#edit-note").hidden = false;
+  document.querySelector("#note-actions").hidden = false;
   document.querySelector("#note-status").textContent = "";
 }
 
+document.querySelector("#note-quiz").addEventListener("click", () => {
+  if (!currentNote) return;
+  state.selectedNoteId = currentNote.id;
+  state.quizReturn = "notes";
+  startQuiz("topic").catch(() => showGate("Кабинет не смог открыть базу."));
+});
+document.querySelector("#note-pin").addEventListener("click", () => {
+  if (currentNote) pinNote(currentNote.id).catch(() => {});
+});
+document.querySelector("#note-delete").addEventListener("click", () => {
+  if (currentNote) askDelete(currentNote.id);
+});
+
+function clearStatusOnInput(inputSelector, statusSelector) {
+  document.querySelector(inputSelector).addEventListener("input", () => {
+    const status = document.querySelector(statusSelector);
+    if (!status.classList.contains("error")) return;
+    status.textContent = "";
+    status.className = "status";
+  });
+}
+
+clearStatusOnInput("#new-note-input", "#new-note-status");
+clearStatusOnInput("#note-body-input", "#note-status");
+clearStatusOnInput("#note-title-input", "#note-status");
+clearStatusOnInput("#name-input", "#save-status");
 document.querySelector("#edit-note").addEventListener("click", beginNoteEdit);
 document.querySelector("#cancel-note").addEventListener("click", cancelNoteEdit);
 document.querySelector("#note-form").addEventListener("submit", async (event) => {
@@ -1551,10 +1851,15 @@ document.querySelector("#note-form").addEventListener("submit", async (event) =>
   if (!currentNote) return;
   const status = document.querySelector("#note-status");
   const payload = {
-    title: currentNote.title || "",
-    subject: currentNote.subject || "",
+    title: document.querySelector("#note-title-input").value.trim(),
+    subject: document.querySelector("#note-subject-picks").dataset.value || "",
     body: document.querySelector("#note-body-input").value.trim()
   };
+  if (!payload.title) {
+    status.className = "status error";
+    status.textContent = "Напиши заголовок.";
+    return;
+  }
   if (!payload.body) {
     status.className = "status error";
     status.textContent = "Напиши текст конспекта.";
@@ -1566,7 +1871,7 @@ document.querySelector("#note-form").addEventListener("submit", async (event) =>
     body: JSON.stringify(payload)
   });
   const data = await response.json().catch(() => ({}));
-  if (response.status === 401) return showGate(LOCKED);
+  if (locked(response)) return;
   if (!response.ok) {
     status.className = "status error";
     status.textContent = detailText(data, "Не удалось сохранить.");
@@ -1582,18 +1887,18 @@ document.querySelector("#note-form").addEventListener("submit", async (event) =>
   paintHome();
   paintNotes();
   paintTopics();
-  document.querySelector("#note-title").textContent = data.title || "Конспект";
-  document.querySelector("#note-meta").textContent = metaLine(data.subject);
+  paintNoteHead(data);
   document.querySelector("#note-body").innerHTML = renderNoteBody(data.body || "");
   document.querySelector("#note-form").hidden = true;
   document.querySelector("#note-body").hidden = false;
   document.querySelector("#edit-note").hidden = false;
+  document.querySelector("#note-actions").hidden = false;
 });
 document.querySelector("#profile-form").addEventListener("submit", async (event) => {
   event.preventDefault();
   const name = nameInput.value.trim();
   const grade = Number(gradeInput.value);
-  const style = styleSlider.value === "1" ? "detail" : "short";
+  const style = styleInput.value === "detail" ? "detail" : "short";
   const goal = goalInput.value || null;
   if (!name) {
     saveStatus.className = "status error";
@@ -1617,9 +1922,9 @@ document.querySelector("#profile-form").addEventListener("submit", async (event)
     const payload = {
       first_name: name,
       grade,
-      reminders: remindersInput.checked,
       explain_style: style,
-      exam_goal: goal
+      exam_goal: goal,
+      reminders: remindersInput.checked
     };
     const response = await fetch("/api/profile", {
       method: "PATCH",
@@ -1627,7 +1932,7 @@ document.querySelector("#profile-form").addEventListener("submit", async (event)
       body: JSON.stringify(payload)
     });
     const data = await response.json().catch(() => ({}));
-    if (response.status === 401) return showGate(LOCKED);
+    if (locked(response)) return;
     if (!response.ok) {
       saveStatus.className = "status error";
       saveStatus.textContent = detailText(data, "Не удалось сохранить.");
@@ -1645,9 +1950,10 @@ document.querySelector("#profile-form").addEventListener("submit", async (event)
     paintTopics();
     paintProfileStats();
     previewFromForm();
+    savedProfile = profileSnapshot();
     saveButton.textContent = "Сохранено";
   } finally {
-    saveButton.disabled = false;
+    saveButton.disabled = profileSnapshot() === savedProfile;
   }
 });
 
@@ -1687,6 +1993,8 @@ async function enter() {
   const webApp = bridge();
   const initData = webApp && typeof webApp.initData === "string" ? webApp.initData : "";
   if (webApp && typeof webApp.ready === "function") webApp.ready();
+  if (webApp && typeof webApp.setHeaderColor === "function") webApp.setHeaderColor("#f7f6fb");
+  if (webApp && typeof webApp.setBackgroundColor === "function") webApp.setBackgroundColor("#f7f6fb");
   if (initData) {
     const response = await fetch("/api/session", {
       method: "POST",
@@ -1694,9 +2002,10 @@ async function enter() {
       body: JSON.stringify({ init_data: initData })
     });
     if (response.status === 401) {
-      showGate("Не удалось подтвердить вход. Закройте кабинет и откройте его кнопкой в чате.");
+      showGate("Не удалось подтвердить вход. Закрой кабинет и открой его кнопкой в чате.");
       return;
     }
+    if (response.status === 403) return showGate(DENIED);
     if (!response.ok) return showGate("Кабинет не смог открыть базу.");
   }
   await loadCabinet();

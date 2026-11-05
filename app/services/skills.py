@@ -1,4 +1,3 @@
-import hashlib
 import math
 import re
 from dataclasses import dataclass
@@ -21,7 +20,6 @@ class SkillChange:
     name: str
     before: float
     after: float
-    sentence: str
 
     @property
     def brighter(self) -> bool:
@@ -80,75 +78,6 @@ def is_dim(skill: dict, now: datetime | None = None) -> bool:
     if level < DIM_BRIGHTNESS:
         return True
     return parse_time(skill["due_at"]) <= moment
-
-
-def star_position(skill_id: int) -> tuple[float, float]:
-    digest = hashlib.sha256(str(skill_id).encode()).digest()
-    x = 14 + digest[0] / 255 * 72
-    y = 16 + digest[1] / 255 * 62
-    return round(x, 1), round(y, 1)
-
-
-def _cell_position(skill_id: int, column: int, row: int, columns: int, rows: int) -> tuple[float, float]:
-    digest = hashlib.sha256(str(skill_id).encode()).digest()
-    width = 84 / columns
-    height = 68 / rows
-    x = 8 + column * width + 4 + digest[0] / 255 * (width - 10)
-    y = 8 + row * height + 4 + digest[1] / 255 * (height - 10)
-    return round(x, 1), round(y, 1)
-
-
-def sentence_for(name: str, before: float, after: float) -> str:
-    if after > before + 0.01:
-        return f"Звезда «{name}» стала ярче."
-    if after + 0.01 < before:
-        return f"Звезда «{name}» потускнела. Зажжём её?"
-    return f"Звезда «{name}» на месте."
-
-
-def sky_payload(skills: list[dict], now: datetime | None = None) -> dict:
-    moment = now or datetime.now(timezone.utc)
-    groups: dict[str, list[dict]] = {}
-    bright = 0
-    dim = 0
-    for skill in skills:
-        level = brightness(skill["strength"], int(skill["box"]), skill["last_seen_at"], moment)
-        faded = is_dim(skill, moment)
-        if faded:
-            dim += 1
-        else:
-            bright += 1
-        star = {
-            "id": skill["id"],
-            "name": skill["name"],
-            "brightness": round(level, 3),
-            "due": parse_time(skill["due_at"]) <= moment,
-            "dim": faded,
-            "box": int(skill["box"]),
-            "last_seen_at": skill["last_seen_at"],
-            "x": 0.0,
-            "y": 0.0,
-        }
-        groups.setdefault(skill["subject"] or "Школьный предмет", []).append(star)
-    subjects = list(groups)
-    columns = 1 if len(subjects) <= 1 else 2
-    rows = max(1, (len(subjects) + columns - 1) // columns)
-    constellations = []
-    for index, subject in enumerate(subjects):
-        stars = groups[subject]
-        for star in stars:
-            star["x"], star["y"] = _cell_position(
-                int(star["id"]),
-                index % columns,
-                index // columns,
-                columns,
-                rows,
-            )
-        constellations.append({"subject": subject, "stars": stars})
-    return {
-        "summary": {"total": len(skills), "bright": bright, "dim": dim},
-        "constellations": constellations,
-    }
 
 
 def _local_skill_match(key: str, known: list[dict]) -> tuple[int, str] | None:
@@ -232,12 +161,4 @@ async def record(
         await db.resolve_errors(user_id, skill_id)
     saved = await db.get_skill(user_id, skill_id)
     after = brightness(saved["strength"], int(saved["box"]), saved["last_seen_at"], now) if saved else strength
-    text = sentence_for(name, before, after)
-    return SkillChange(skill_id, name, round(before, 3), round(after, 3), text)
-
-
-def dim_skills(skills: list[dict], limit: int = 3, now: datetime | None = None) -> list[dict]:
-    moment = now or datetime.now(timezone.utc)
-    faded = [skill for skill in skills if is_dim(skill, moment)]
-    faded.sort(key=lambda skill: brightness(skill["strength"], int(skill["box"]), skill["last_seen_at"], moment))
-    return faded[:limit]
+    return SkillChange(skill_id, name, round(before, 3), round(after, 3))
