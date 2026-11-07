@@ -4,10 +4,6 @@
 
 <br>
 
-[Возможности](#возможности) &nbsp;·&nbsp; [Архитектура](#архитектура) &nbsp;·&nbsp; [Установка](#установка-и-запуск) &nbsp;·&nbsp; [Конфигурация](#конфигурация) &nbsp;·&nbsp; [Безопасность](#надёжность-и-безопасность)
-
-<br>
-
 [![Language](https://img.shields.io/badge/Language-Python_3.12-4C3F91?style=flat-square&logo=python&logoColor=white&labelColor=1F2937)](https://www.python.org/)
 [![Backend](https://img.shields.io/badge/Backend-FastAPI-4C3F91?style=flat-square&logo=fastapi&logoColor=white&labelColor=1F2937)](https://fastapi.tiangolo.com/)
 [![AI](https://img.shields.io/badge/AI-Gemini_API-4C3F91?style=flat-square&logo=googlegemini&logoColor=white&labelColor=1F2937)](https://ai.google.dev/)
