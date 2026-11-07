@@ -3,6 +3,7 @@ import logging
 
 import uvicorn
 from maxapi import Bot, Dispatcher
+from maxapi.context import SimpleEventIsolation
 from maxapi.enums.parse_mode import ParseMode
 from maxapi.enums.update import UpdateType
 from maxapi.webhook.fastapi import FastAPIMaxWebhook
@@ -189,7 +190,12 @@ async def amain() -> None:
             hook_url, hook_secret = "", ""
     if token:
         bot = Bot(token=token, parse_mode=ParseMode.HTML)
-        dispatcher = Dispatcher()
+        # use_create_task: webhook сразу отвечает 200, иначе MAX ретраит
+        # долгий разбор Gemini и бот шлёт одни и те же ответы по кругу.
+        dispatcher = Dispatcher(
+            use_create_task=True,
+            event_isolation=SimpleEventIsolation(),
+        )
         web_app = await _bot_username(bot)
         BotApp(bot, db, tutor, settings.cabinet_url, web_app, allowed).register(dispatcher)
         if hook_url:

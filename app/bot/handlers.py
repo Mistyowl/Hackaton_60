@@ -1,4 +1,6 @@
 import logging
+import time
+from collections import OrderedDict
 from pathlib import Path
 
 from maxapi.enums.attachment import AttachmentType
@@ -77,6 +79,45 @@ TOUR_IMAGES = [
 AUDIO_LIMIT = 8 * 1024 * 1024
 VOICE_DOWNLOAD_FAIL = "Не смогла скачать голосовое. Пришли ещё раз или напиши текстом."
 VOICE_TOO_BIG = "Голосовое слишком длинное. Пришли запись до 8 МБ или напиши текстом."
+# Повтор webhook от MAX с тем же mid/callback_id — не гоняем Gemini снова.
+UPDATE_TTL_SECONDS = 900
+UPDATE_MAX_SIZE = 4096
+
+
+class RecentIds:
+    """Короткий in-memory дедуп входящих апдейтов MAX."""
+
+    def __init__(
+        self,
+        ttl_seconds: float = UPDATE_TTL_SECONDS,
+        max_size: int = UPDATE_MAX_SIZE,
+    ) -> None:
+        self._ttl = ttl_seconds
+        self._max_size = max_size
+        self._seen: OrderedDict[str, float] = OrderedDict()
+
+    def claim(self, key: str | None) -> bool:
+        """True — обработать впервые; False — уже видели этот ключ."""
+        if not key:
+            return True
+        now = time.monotonic()
+        self._purge(now)
+        if key in self._seen:
+            self._seen.move_to_end(key)
+            self._seen[key] = now
+            return False
+        self._seen[key] = now
+        if len(self._seen) > self._max_size:
+            self._seen.popitem(last=False)
+        return True
+
+    def _purge(self, now: float) -> None:
+        cutoff = now - self._ttl
+        while self._seen:
+            oldest_key, stamped = next(iter(self._seen.items()))
+            if stamped >= cutoff:
+                break
+            self._seen.popitem(last=False)
 
 
 class BotApp:
@@ -95,6 +136,7 @@ class BotApp:
         self.cabinet_url = cabinet_url.strip().rstrip("/")
         self.web_app = web_app.strip().lstrip("@")
         self.allowed_user_ids = allowed_user_ids or set()
+        self._seen_updates = RecentIds()
 
     def _allowed(self, user_id: int) -> bool:
         return user_allowed(user_id, self.allowed_user_ids)
@@ -172,13 +214,21 @@ class BotApp:
             # для нативных голосовых на long polling.
             log.warning("message_created без отправителя — пропуск")
             return
+        sender = event.message.sender
+        if sender is not None and sender.is_bot:
+            log.info("Пропуск сообщения бота user_id=%s", user_id)
+            return
+        body = event.message.body
+        mid = body.mid if body is not None else None
+        if not self._seen_updates.claim(f"msg:{mid}" if mid else None):
+            log.info("Повтор message_created mid=%s — пропуск", mid)
+            return
         if not self._allowed(user_id):
             log.info("Отказ в доступе user_id=%s", user_id)
             await self.send(chat_id, user_id, ACCESS_CLOSED, None)
             return
         await self.db.upsert_user(user_id, first_name)
         await self.db.set_chat(user_id, chat_id)
-        body = event.message.body
         text = (body.text or "").strip() if body else ""
         image_url = self._image_url(event)
         audio = self._audio_attachment(event)
@@ -233,6 +283,10 @@ class BotApp:
     async def _on_callback(self, event: MessageCallback) -> None:
         chat_id, user_id = event.get_ids()
         if user_id is None:
+            return
+        callback_id = event.callback.callback_id
+        if not self._seen_updates.claim(f"cb:{callback_id}"):
+            log.info("Повтор message_callback callback_id=%s — пропуск", callback_id)
             return
         if not self._allowed(user_id):
             log.info("Отказ в доступе user_id=%s", user_id)

@@ -10,7 +10,7 @@ from unittest.mock import patch
 from httpx import ASGITransport, AsyncClient
 
 from app.bot.commands import bot_commands
-from app.bot.handlers import voice_from_attachments
+from app.bot.handlers import RecentIds, voice_from_attachments
 from app.config import (
     gemini_proxy_url,
     parse_allowed_user_ids,
@@ -132,6 +132,25 @@ class TextTests(unittest.TestCase):
         self.assertTrue(audio_filename_ok("voice.ogg"))
         self.assertTrue(audio_filename_ok("HW.M4A"))
         self.assertFalse(audio_filename_ok("notes.pdf"))
+
+
+class RecentIdsTests(unittest.TestCase):
+    def test_claims_once_until_ttl(self) -> None:
+        seen = RecentIds(ttl_seconds=60, max_size=8)
+        self.assertTrue(seen.claim("msg:1"))
+        self.assertFalse(seen.claim("msg:1"))
+        self.assertTrue(seen.claim("msg:2"))
+        self.assertTrue(seen.claim(None))
+        self.assertTrue(seen.claim(""))
+
+    def test_expires_and_respects_max_size(self) -> None:
+        seen = RecentIds(ttl_seconds=30, max_size=2)
+        with patch("app.bot.handlers.time.monotonic", side_effect=[1.0, 1.0, 1.0, 40.0, 40.0]):
+            self.assertTrue(seen.claim("a"))
+            self.assertTrue(seen.claim("b"))
+            self.assertTrue(seen.claim("c"))  # вытесняет самый старый
+            self.assertTrue(seen.claim("a"))  # ttl истёк — снова можно
+            self.assertFalse(seen.claim("a"))
 
 
 class VoiceAttachmentTests(unittest.TestCase):
