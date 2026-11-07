@@ -1,24 +1,27 @@
 <div align="center">
 
-<img src="app/assets/lumi-mark.png" alt="Люми" width="160">
-
-# Люми
-
----
-
-**Образовательный ИИ-ассистент для школьников 5–11 классов в мессенджере MAX.**  
-Пошаговые объяснения, проверка решений по фото, банк ошибок и интервальные повторения.
+<img src="docs/banner.png" alt="Люми — образовательный ИИ-ассистент в мессенджере MAX" width="100%">
 
 <br>
 
-<img alt="LICENSE" src="https://img.shields.io/badge/LICENSE-MIT-brown">
-<img alt="PYTHON" src="https://img.shields.io/badge/PYTHON-3.12-3776AB?logo=python&logoColor=white">
-<img alt="FASTAPI" src="https://img.shields.io/badge/FASTAPI-009688?logo=fastapi&logoColor=white">
-<img alt="GEMINI" src="https://img.shields.io/badge/GEMINI-8E75B2?logo=googlegemini&logoColor=white">
-<img alt="SQLITE" src="https://img.shields.io/badge/SQLITE-003B57?logo=sqlite&logoColor=white">
-<img alt="DOCKER" src="https://img.shields.io/badge/DOCKER-2496ED?logo=docker&logoColor=white">
+[Возможности](#возможности) &nbsp;·&nbsp; [Архитектура](#архитектура) &nbsp;·&nbsp; [Установка](#установка-и-запуск) &nbsp;·&nbsp; [Конфигурация](#конфигурация) &nbsp;·&nbsp; [Безопасность](#надёжность-и-безопасность)
+
+<br>
+
+[![Language](https://img.shields.io/badge/Language-Python_3.12-4C3F91?style=flat-square&logo=python&logoColor=white&labelColor=1F2937)](https://www.python.org/)
+[![Backend](https://img.shields.io/badge/Backend-FastAPI-4C3F91?style=flat-square&logo=fastapi&logoColor=white&labelColor=1F2937)](https://fastapi.tiangolo.com/)
+[![AI](https://img.shields.io/badge/AI-Gemini_API-4C3F91?style=flat-square&logo=googlegemini&logoColor=white&labelColor=1F2937)](https://ai.google.dev/)
+[![Database](https://img.shields.io/badge/Database-SQLite_FTS5-4C3F91?style=flat-square&logo=sqlite&logoColor=white&labelColor=1F2937)](https://www.sqlite.org/fts5.html)
+[![Deploy](https://img.shields.io/badge/Deploy-Docker-4C3F91?style=flat-square&logo=docker&logoColor=white&labelColor=1F2937)](https://www.docker.com/)
+[![License](https://img.shields.io/badge/License-MIT-4C3F91?style=flat-square&labelColor=1F2937)](LICENSE)
 
 </div>
+
+---
+
+| Обучающий формат | Проверка решений | Банк ошибок | Интервальные повторения |
+|:--|:--|:--|:--|
+| Подсказка и наводящий вопрос вместо готового ответа | Определяет шаг с ошибкой по фото тетради | Накопление ошибок и квизы на их основе | Напоминания и события в календаре |
 
 ---
 
