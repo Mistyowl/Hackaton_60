@@ -22,7 +22,8 @@ CREATE TABLE IF NOT EXISTS users (
     exam_goal TEXT,
     chat_id INTEGER,
     reminders INTEGER NOT NULL DEFAULT 1,
-    last_reminder_on TEXT
+    last_reminder_on TEXT,
+    cabinet_tour INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS sessions (
@@ -235,6 +236,10 @@ class Database:
             await self.conn.execute("ALTER TABLE users ADD COLUMN last_reminder_on TEXT")
         if "exam_goal" not in have:
             await self.conn.execute("ALTER TABLE users ADD COLUMN exam_goal TEXT")
+        if "cabinet_tour" not in have:
+            await self.conn.execute(
+                "ALTER TABLE users ADD COLUMN cabinet_tour INTEGER NOT NULL DEFAULT 0"
+            )
 
     async def _normalize_subjects(self) -> None:
         # skills не трогаем: UNIQUE(user_id, subject, name) может склеить строки.
@@ -313,7 +318,8 @@ class Database:
     async def get_user(self, user_id: int) -> dict:
         cursor = await self.conn.execute(
             """
-            SELECT user_id, first_name, grade, explain_style, exam_goal, chat_id, reminders
+            SELECT user_id, first_name, grade, explain_style, exam_goal, chat_id, reminders,
+                   cabinet_tour
             FROM users WHERE user_id = ?
             """,
             (user_id,),
@@ -323,7 +329,8 @@ class Database:
             await self.upsert_user(user_id, "")
             cursor = await self.conn.execute(
                 """
-                SELECT user_id, first_name, grade, explain_style, exam_goal, chat_id, reminders
+                SELECT user_id, first_name, grade, explain_style, exam_goal, chat_id, reminders,
+                       cabinet_tour
                 FROM users WHERE user_id = ?
                 """,
                 (user_id,),
@@ -375,6 +382,20 @@ class Database:
         await self.conn.execute(
             "UPDATE users SET reminders = ? WHERE user_id = ?",
             (1 if enabled else 0, user_id),
+        )
+        await self.conn.commit()
+
+    async def set_cabinet_tour(self, user_id: int) -> None:
+        await self.conn.execute(
+            "UPDATE users SET cabinet_tour = 1 WHERE user_id = ?",
+            (user_id,),
+        )
+        await self.conn.commit()
+
+    async def clear_cabinet_tour(self, user_id: int) -> None:
+        await self.conn.execute(
+            "UPDATE users SET cabinet_tour = 0 WHERE user_id = ?",
+            (user_id,),
         )
         await self.conn.commit()
 
@@ -472,7 +493,7 @@ class Database:
         cursor = await self.conn.execute(
             """
             SELECT users.user_id, users.first_name, users.grade, users.explain_style,
-                   users.exam_goal, users.chat_id, users.reminders
+                   users.exam_goal, users.chat_id, users.reminders, users.cabinet_tour
             FROM cabinet_sessions
             JOIN users ON users.user_id = cabinet_sessions.user_id
             WHERE cabinet_sessions.token = ? AND cabinet_sessions.expires_at > ?
@@ -569,6 +590,37 @@ class Database:
         rows.reverse()
         return rows
 
+    async def clear_learning(self, user_id: int) -> None:
+        await self.conn.execute(
+            """
+            DELETE FROM quiz_questions
+            WHERE quiz_id IN (SELECT id FROM quizzes WHERE user_id = ?)
+            """,
+            (user_id,),
+        )
+        await self.conn.execute("DELETE FROM quizzes WHERE user_id = ?", (user_id,))
+        await self.conn.execute(
+            """
+            DELETE FROM skill_events
+            WHERE skill_id IN (SELECT id FROM skills WHERE user_id = ?)
+            """,
+            (user_id,),
+        )
+        await self.conn.execute("DELETE FROM skills WHERE user_id = ?", (user_id,))
+        await self.conn.execute("DELETE FROM notes WHERE user_id = ?", (user_id,))
+        await self.conn.execute("DELETE FROM errors WHERE user_id = ?", (user_id,))
+        await self.conn.execute("DELETE FROM checks WHERE user_id = ?", (user_id,))
+        await self.conn.execute("DELETE FROM messages WHERE user_id = ?", (user_id,))
+        await self.conn.execute(
+            """
+            UPDATE sessions
+            SET active_quiz_id = NULL, last_tutor_json = NULL, last_check_id = NULL, updated_at = ?
+            WHERE user_id = ?
+            """,
+            (utcnow(), user_id),
+        )
+        await self.conn.commit()
+
     async def insert_note(
         self,
         user_id: int,
@@ -576,6 +628,7 @@ class Database:
         subject: str,
         body: str,
         source: str,
+        created_at: str | None = None,
     ) -> int:
         cursor = await self.conn.execute(
             """
@@ -588,7 +641,7 @@ class Database:
                 (subject or "").strip()[:80],
                 body.strip(),
                 source,
-                utcnow(),
+                created_at or utcnow(),
             ),
         )
         await self.conn.commit()
@@ -723,6 +776,7 @@ class Database:
         skill_id: int | None = None,
         source: str = "check",
         question_id: int | None = None,
+        created_at: str | None = None,
     ) -> int:
         cursor = await self.conn.execute(
             """
@@ -741,7 +795,7 @@ class Database:
                 skill_id,
                 (source or "check")[:20],
                 question_id,
-                utcnow(),
+                created_at or utcnow(),
             ),
         )
         await self.conn.commit()
@@ -770,6 +824,29 @@ class Database:
             """,
             (user_id, limit),
         )
+        return [dict(row) for row in await cursor.fetchall()]
+
+    async def list_open_errors_with_skill(
+        self,
+        user_id: int,
+        skill_ids: list[int] | None = None,
+        limit: int = 40,
+    ) -> list[dict]:
+        if skill_ids is not None and not skill_ids:
+            return []
+        sql = """
+            SELECT id, subject, problem, mistake, explanation, skill_id, source, created_at
+            FROM errors
+            WHERE user_id = ? AND resolved_at IS NULL AND skill_id IS NOT NULL
+        """
+        params: list[object] = [user_id]
+        if skill_ids is not None:
+            placeholders = ",".join("?" for _ in skill_ids)
+            sql += f" AND skill_id IN ({placeholders})"
+            params.extend(int(item) for item in skill_ids)
+        sql += " ORDER BY id DESC LIMIT ?"
+        params.append(limit)
+        cursor = await self.conn.execute(sql, params)
         return [dict(row) for row in await cursor.fetchall()]
 
     async def list_error_bank(self, user_id: int, limit: int = 40) -> list[dict]:
@@ -907,7 +984,7 @@ class Database:
                 fields.get("full_explanation", "")[:4000],
                 fields.get("skill", "")[:200],
                 fields.get("praise", "")[:500],
-                utcnow(),
+                fields.get("created_at") or utcnow(),
             ),
         )
         await self.conn.commit()
@@ -973,6 +1050,46 @@ class Database:
             """,
             (quiz_id, now, user_id),
         )
+        await self.conn.commit()
+        return quiz_id
+
+    async def insert_done_quiz(
+        self,
+        user_id: int,
+        title: str,
+        source: str,
+        finished_at: str,
+        questions: list[dict],
+    ) -> int:
+        cursor = await self.conn.execute(
+            """
+            INSERT INTO quizzes (user_id, title, source, status, started_at, finished_at)
+            VALUES (?, ?, ?, 'done', ?, ?)
+            """,
+            (user_id, title[:120] or "Квиз", source, finished_at, finished_at),
+        )
+        quiz_id = int(cursor.lastrowid)
+        for position, question in enumerate(questions):
+            await self.conn.execute(
+                """
+                INSERT INTO quiz_questions (
+                    quiz_id, prompt, options_json, correct_index,
+                    explanation, skill, subject, status, position, attempts
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, 'done', ?, ?)
+                """,
+                (
+                    quiz_id,
+                    question["prompt"],
+                    json.dumps(question["options"], ensure_ascii=False),
+                    int(question["correct_index"]),
+                    question["explanation"],
+                    (question.get("skill") or "")[:80],
+                    (question.get("subject") or "")[:80],
+                    position,
+                    int(question.get("attempts") or 1),
+                ),
+            )
         await self.conn.commit()
         return quiz_id
 
@@ -1162,13 +1279,35 @@ class Database:
         )
         await self.conn.commit()
 
-    async def insert_skill_event(self, skill_id: int, kind: str, correct: bool) -> None:
+    async def insert_skill_event(
+        self,
+        skill_id: int,
+        kind: str,
+        correct: bool,
+        created_at: str | None = None,
+    ) -> None:
         await self.conn.execute(
             """
             INSERT INTO skill_events (skill_id, kind, correct, created_at)
             VALUES (?, ?, ?, ?)
             """,
-            (skill_id, kind, 1 if correct else 0, utcnow()),
+            (skill_id, kind, 1 if correct else 0, created_at or utcnow()),
+        )
+        await self.conn.commit()
+
+    async def close_error(
+        self,
+        user_id: int,
+        error_id: int,
+        resolved_at: str | None = None,
+    ) -> None:
+        await self.conn.execute(
+            """
+            UPDATE errors
+            SET resolved_at = ?
+            WHERE id = ? AND user_id = ? AND resolved_at IS NULL
+            """,
+            (resolved_at or utcnow(), error_id, user_id),
         )
         await self.conn.commit()
 

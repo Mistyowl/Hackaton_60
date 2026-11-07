@@ -11,6 +11,7 @@ from app.bot.render import EMPTY_ERRORS
 from app.config import ACCESS_CLOSED, user_allowed
 from app.db import CABINET_SESSION_MINUTES, WEEK_GOAL, Database
 from app.services.calendar_export import EMPTY_CALENDAR, build_calendar
+from app.services.demo import DEMO_USER_ID, ensure_demo
 from app.services.limits import LIMIT_MESSAGE, allow
 from app.services.notes import SearchLimited, save_manual, search_notes
 from app.services.reminders import moscow_now
@@ -18,10 +19,13 @@ from app.services.quiz import (
     answer_question,
     ensure_topic,
     question_options,
+    start_due_quiz,
     start_error_quiz,
     start_note_quiz,
+    start_skill_quiz,
     start_topic_quiz,
 )
+from app.services.skills import build_skill_graph
 from app.services.tutor import Tutor, TutorError
 from app.textutil import normalize_subject
 from app.webapp import validate_init_data
@@ -74,13 +78,17 @@ def build_version() -> str:
     return hashlib.sha256("".join(parts).encode()).hexdigest()[:12]
 
 
-def cabinet_html() -> str:
+def cabinet_html(demo: bool = False) -> str:
     page = PAGE_PATH.read_text(encoding="utf-8")
-    page = page.replace(
-        "<head>",
-        f'<head>\n  <meta name="lumi-build" content="{build_version()}">',
-        1,
-    )
+    extra = f'  <meta name="lumi-build" content="{build_version()}">\n'
+    if demo:
+        extra += '  <meta name="lumi-demo" content="1">\n'
+        page = page.replace(
+            '<div id="gate" class="gate">',
+            '<div id="gate" class="gate" hidden>',
+            1,
+        )
+    page = page.replace("<head>", "<head>\n" + extra, 1)
     return page.replace(
         'href="/static/cabinet.css"',
         f'href="/static/{hashed_asset("cabinet.css")}"',
@@ -119,8 +127,10 @@ def create_app(
         user = await db.cabinet_user(request.cookies.get(COOKIE, ""))
         if user is None:
             raise HTTPException(status_code=401, detail="Открой кабинет из чата с ботом")
-        if not user_allowed(int(user["user_id"]), allowed):
-            log.info("Отказ в доступе user_id=%s", user["user_id"])
+        user_id = int(user["user_id"])
+        # Демо-учётка публичная: страница /demo для жюри, не ученик из белого списка.
+        if user_id != DEMO_USER_ID and not user_allowed(user_id, allowed):
+            log.info("Отказ в доступе user_id=%s", user_id)
             raise HTTPException(status_code=403, detail=ACCESS_CLOSED)
         return user
 
@@ -132,6 +142,11 @@ def create_app(
     @app.get("/index.html", response_class=HTMLResponse)
     async def index() -> HTMLResponse:
         return HTMLResponse(cabinet_html(), headers=NO_STORE)
+
+    @app.get("/demo", response_class=HTMLResponse)
+    @app.get("/demo/", response_class=HTMLResponse)
+    async def demo_page() -> HTMLResponse:
+        return HTMLResponse(cabinet_html(demo=True), headers=NO_STORE)
 
     @app.get("/api/version")
     async def version() -> JSONResponse:
@@ -166,17 +181,15 @@ def create_app(
             raise HTTPException(status_code=403, detail=ACCESS_CLOSED)
         await db.upsert_user(user.user_id, user.first_name)
         session = await db.create_cabinet_session(user.user_id)
-        response = JSONResponse({"ok": True})
-        response.set_cookie(
-            COOKIE,
-            session,
-            max_age=CABINET_SESSION_MINUTES * 60,
-            httponly=True,
-            secure=True,
-            samesite="lax",
-            path="/",
-        )
-        return response
+        return _attach_session(JSONResponse({"ok": True}), session)
+
+    @app.post("/api/demo/session")
+    async def demo_session() -> JSONResponse:
+        await ensure_demo(db)
+        # Общая учётка: каждое открытие /demo снова показывает тур.
+        await db.clear_cabinet_tour(DEMO_USER_ID)
+        session = await db.create_cabinet_session(DEMO_USER_ID)
+        return _attach_session(JSONResponse({"ok": True}), session)
 
     @app.get("/api/profile")
     async def profile(request: Request) -> dict:
@@ -234,6 +247,12 @@ def create_app(
             },
             stats,
         )
+
+    @app.post("/api/tour")
+    async def mark_tour(request: Request) -> dict:
+        user = await student(request)
+        await db.set_cabinet_tour(int(user["user_id"]))
+        return {"ok": True}
 
     @app.get("/api/notes")
     async def notes(request: Request) -> dict:
@@ -481,6 +500,52 @@ def create_app(
             raise HTTPException(status_code=409, detail=EMPTY_ERRORS)
         return await _quiz_payload(db, quiz_id)
 
+    @app.get("/api/skills/graph")
+    async def skills_graph(request: Request) -> dict:
+        user = await student(request)
+        return await build_skill_graph(db, int(user["user_id"]))
+
+    @app.post("/api/quizzes/skill/{skill_id}")
+    async def quiz_skill(skill_id: int, request: Request) -> dict:
+        user = await student(request)
+        user_id = int(user["user_id"])
+        skill = await db.get_skill(user_id, skill_id)
+        if skill is None:
+            raise HTTPException(status_code=404, detail="Приём не найден.")
+        try:
+            payload = await request.json()
+        except Exception:
+            payload = {}
+        if not isinstance(payload, dict):
+            payload = {}
+        _spend(user_id)
+        try:
+            quiz_id = await start_skill_quiz(db, tutor, user_id, skill_id, _wanted(payload))
+        except TutorError as error:
+            raise HTTPException(status_code=502, detail=error.user_message) from None
+        if quiz_id is None:
+            raise HTTPException(status_code=409, detail="Не удалось собрать квиз по этому приёму.")
+        return await _quiz_payload(db, quiz_id)
+
+    @app.post("/api/quizzes/due")
+    async def quiz_due(request: Request) -> dict:
+        user = await student(request)
+        user_id = int(user["user_id"])
+        try:
+            payload = await request.json()
+        except Exception:
+            payload = {}
+        if not isinstance(payload, dict):
+            payload = {}
+        _spend(user_id)
+        try:
+            quiz_id = await start_due_quiz(db, tutor, user_id, _wanted(payload))
+        except TutorError as error:
+            raise HTTPException(status_code=502, detail=error.user_message) from None
+        if quiz_id is None:
+            raise HTTPException(status_code=409, detail="Пока нечего повторять.")
+        return await _quiz_payload(db, quiz_id)
+
     @app.post("/api/quizzes/answer")
     async def quiz_answer(request: Request) -> dict:
         user = await student(request)
@@ -543,6 +608,19 @@ def create_app(
         return await _quiz_payload(db, quiz_id)
 
     return app
+
+
+def _attach_session(response: JSONResponse, token: str) -> JSONResponse:
+    response.set_cookie(
+        COOKIE,
+        token,
+        max_age=CABINET_SESSION_MINUTES * 60,
+        httponly=True,
+        secure=True,
+        samesite="lax",
+        path="/",
+    )
+    return response
 
 
 def _spend(user_id: int) -> None:
@@ -617,6 +695,7 @@ def _profile_payload(user: dict, stats: dict | None = None) -> dict:
         "explain_style": user["explain_style"],
         "exam_goal": user.get("exam_goal") or None,
         "reminders": bool(user.get("reminders", 1)),
+        "cabinet_tour": bool(user.get("cabinet_tour")),
         "quizzes_done": 0,
         "closed_errors": 0,
         "accuracy": 0,

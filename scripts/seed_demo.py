@@ -1,58 +1,23 @@
-"""Заполняет ученика демо-данными для показа жюри.
+"""Заполняет демо-учётку для страницы /demo.
 
-Запуск: python -m scripts.seed_demo [user_id]
-Повторный запуск обновляет навыки этого ученика и не плодит одинаковые конспекты.
+Запуск: python -m scripts.seed_demo
+Повторный запуск заново собирает конспекты, ошибки и квизы этой учётки.
 """
 
 import asyncio
-import sys
-from datetime import datetime, timedelta, timezone
 
 from app.config import get_settings
 from app.db import Database
-
-SAMPLES = [
-    ("Алгебра", "деление дробей", 0.8, 4, 1, "Демо: деление дробей", "Чтобы разделить дроби, умножь на перевёрнутую."),
-    ("Алгебра", "проценты", 0.4, 2, 6, "Демо: проценты", "Процент — это сотая часть числа."),
-    ("Алгебра", "линейные уравнения", 0.2, 1, 9, "Демо: уравнения", "Переноси слагаемые и дели обе части на коэффициент."),
-    ("Геометрия", "теорема пифагора", 1.0, 5, 2, "Демо: Пифагор", "Квадрат гипотенузы равен сумме квадратов катетов."),
-    ("Геометрия", "площадь треугольника", 0.4, 2, 8, "Демо: площадь", "Площадь равна половине произведения основания на высоту."),
-    ("Физика", "закон ома", 0.6, 3, 3, "Демо: закон Ома", "Сила тока равна напряжению, делённому на сопротивление."),
-    ("Физика", "скорость", 0.2, 1, 12, "Демо: скорость", "Скорость — это путь, делённый на время."),
-    ("Русский язык", "н и нн", 0.8, 4, 4, "Демо: н и нн", "В кратком причастии пишется одна н."),
-]
-DEMO_ERRORS = {
-    "линейные уравнения": ("Реши уравнение 3x + 5 = 20.", "Перенёс 5 без смены знака: 3x = 25."),
-    "скорость": ("Велосипедист проехал 36 км за 2 часа. Найди скорость.", "Умножил путь на время вместо деления."),
-}
+from app.services.demo import DEMO_NAME, DEMO_USER_ID, NOTES, ensure_demo
 
 
 async def main() -> None:
-    user_id = int(sys.argv[1]) if len(sys.argv) > 1 else 1
     settings = get_settings()
     db = Database(settings.database_path)
     await db.connect()
-    await db.upsert_user(user_id, "Аня")
-    await db.set_grade(user_id, 8)
-    await db.set_explain_style(user_id, "detail")
-    await db.conn.execute("DELETE FROM skill_events WHERE skill_id IN (SELECT id FROM skills WHERE user_id = ?)", (user_id,))
-    await db.conn.execute("DELETE FROM skills WHERE user_id = ?", (user_id,))
-    await db.conn.commit()
-    now = datetime.now(timezone.utc)
-    existing = {row["title"] for row in await db.list_notes(user_id, 0, 100)}
-    for subject, name, strength, box, days_ago, title, body in SAMPLES:
-        seen = (now - timedelta(days=days_ago)).isoformat(timespec="seconds")
-        due = (now - timedelta(days=1)).isoformat(timespec="seconds") if days_ago >= 6 else (now + timedelta(days=box)).isoformat(timespec="seconds")
-        skill_id = await db.insert_skill(user_id, subject, name, strength, box, seen, due)
-        await db.insert_skill_event(skill_id, "check", strength >= 0.6)
-        if title not in existing:
-            note_id = await db.insert_note(user_id, title, subject, body, "manual")
-            await db.set_note_skill(user_id, note_id, skill_id)
-        if name in DEMO_ERRORS:
-            problem, mistake = DEMO_ERRORS[name]
-            await db.insert_error(user_id, subject, problem, mistake, body, skill_id)
+    await ensure_demo(db, force=True)
     await db.close()
-    print(f"Демо-данные ученика {user_id} готовы: {len(SAMPLES)} навыков.")
+    print(f"Демо-кабинет «{DEMO_NAME}» готов: {len(NOTES)} конспектов, user_id={DEMO_USER_ID}.")
 
 
 if __name__ == "__main__":

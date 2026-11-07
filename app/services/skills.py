@@ -117,6 +117,76 @@ async def _match_name(tutor: Tutor | None, raw: str, known: list[dict]) -> tuple
     return None, (name or label)[:60]
 
 
+def _short_label(value: str, limit: int = 40) -> str:
+    text = " ".join((value or "").split())
+    if len(text) <= limit:
+        return text
+    return text[: limit - 1].rstrip() + "…"
+
+
+async def build_skill_graph(db: Database, user_id: int) -> dict:
+    skills = await db.list_skills(user_id)
+    if not skills:
+        return {"nodes": [], "edges": [], "due_count": 0}
+    now = datetime.now(timezone.utc)
+    open_errors = await db.list_open_errors_with_skill(user_id, limit=80)
+    errors_by_skill: dict[int, list[dict]] = {}
+    for row in open_errors:
+        skill_id = row.get("skill_id")
+        if skill_id is None:
+            continue
+        errors_by_skill.setdefault(int(skill_id), []).append(row)
+
+    nodes: list[dict] = []
+    edges: list[dict] = []
+    subjects: set[str] = set()
+    due_count = 0
+    for skill in skills:
+        subject = " ".join((skill.get("subject") or "").split()).strip() or "Школьный предмет"
+        skill_id = int(skill["id"])
+        level = brightness(skill["strength"], int(skill["box"]), skill["last_seen_at"], now)
+        due = is_dim(skill, now)
+        if due:
+            due_count += 1
+        linked = errors_by_skill.get(skill_id, [])
+        if subject not in subjects:
+            subjects.add(subject)
+            nodes.append(
+                {
+                    "id": f"subj:{subject}",
+                    "kind": "subject",
+                    "label": subject,
+                }
+            )
+        nodes.append(
+            {
+                "id": f"skill:{skill_id}",
+                "kind": "skill",
+                "label": skill["name"],
+                "skill_id": skill_id,
+                "subject": subject,
+                "brightness": round(level, 3),
+                "due": due,
+                "box": int(skill["box"]),
+                "open_errors": len(linked),
+            }
+        )
+        edges.append({"from": f"subj:{subject}", "to": f"skill:{skill_id}"})
+        for row in linked[:6]:
+            error_id = int(row["id"])
+            nodes.append(
+                {
+                    "id": f"error:{error_id}",
+                    "kind": "error",
+                    "label": _short_label(row.get("mistake") or "ошибка"),
+                    "error_id": error_id,
+                    "skill_id": skill_id,
+                }
+            )
+            edges.append({"from": f"skill:{skill_id}", "to": f"error:{error_id}"})
+    return {"nodes": nodes, "edges": edges, "due_count": due_count}
+
+
 async def record(
     db: Database,
     user_id: int,

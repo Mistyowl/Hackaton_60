@@ -2,7 +2,7 @@ import json
 from dataclasses import dataclass
 
 from app.db import Database
-from app.services.skills import record
+from app.services.skills import is_dim, record
 from app.services.tutor import Tutor, TutorError
 from app.textutil import format_elapsed, normalize_subject
 
@@ -63,6 +63,16 @@ async def start_error_quiz(db: Database, tutor: Tutor, user_id: int) -> int | No
     errors = await db.list_errors(user_id, limit=8)
     if not errors:
         return None
+    return await _quiz_from_errors(db, tutor, user_id, errors, "По моим ошибкам")
+
+
+async def _quiz_from_errors(
+    db: Database,
+    tutor: Tutor,
+    user_id: int,
+    errors: list[dict],
+    fallback_title: str,
+) -> int:
     payload = [
         {
             "subject": item["subject"],
@@ -75,10 +85,42 @@ async def start_error_quiz(db: Database, tutor: Tutor, user_id: int) -> int | No
     title, drafts = await tutor.make_quiz(topic=None, errors=payload, **await _learner(db, user_id))
     return await db.create_quiz(
         user_id,
-        title or "По моим ошибкам",
+        title or fallback_title,
         "errors",
         [draft.__dict__ for draft in drafts],
     )
+
+
+async def start_skill_quiz(
+    db: Database,
+    tutor: Tutor,
+    user_id: int,
+    skill_id: int,
+    wanted: int = 6,
+) -> int | None:
+    skill = await db.get_skill(user_id, skill_id)
+    if skill is None:
+        return None
+    errors = await db.list_open_errors_with_skill(user_id, skill_ids=[skill_id], limit=8)
+    label = skill["name"] or "приём"
+    if errors:
+        return await _quiz_from_errors(db, tutor, user_id, errors, f"Повторить: {label}")
+    topic = f"{skill['subject']}: {label}".strip(": ")
+    return await start_topic_quiz(db, tutor, user_id, topic, wanted)
+
+
+async def start_due_quiz(db: Database, tutor: Tutor, user_id: int, wanted: int = 6) -> int | None:
+    skills = await db.list_skills(user_id)
+    due = [item for item in skills if is_dim(item)]
+    if not due:
+        return None
+    due_ids = [int(item["id"]) for item in due]
+    errors = await db.list_open_errors_with_skill(user_id, skill_ids=due_ids, limit=8)
+    if errors:
+        return await _quiz_from_errors(db, tutor, user_id, errors, "Повторить сегодня")
+    names = [f"{item['subject']}: {item['name']}" for item in due[:3]]
+    topic = "; ".join(names)
+    return await start_topic_quiz(db, tutor, user_id, topic, wanted)
 
 
 async def answer_question(

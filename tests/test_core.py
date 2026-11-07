@@ -38,15 +38,24 @@ from app.services.notes import (
 )
 from app.bot.render import render_check, render_feedback
 from app.services.calendar_export import EMPTY_CALENDAR, build_calendar, next_evening_slot
+from app.services.demo import DEMO_NOTE, DEMO_USER_ID, ensure_demo
 from app.services.reminders import MOSCOW, in_quiet_hours, reminder_text
 from app.services.skills import (
     _local_skill_match,
     brightness,
+    build_skill_graph,
     next_box,
     normalize_name,
     record,
 )
-from app.services.quiz import AnswerView, answer_question, start_error_quiz, start_topic_quiz
+from app.services.quiz import (
+    AnswerView,
+    answer_question,
+    start_due_quiz,
+    start_error_quiz,
+    start_skill_quiz,
+    start_topic_quiz,
+)
 from app.services.tutor import (
     QUIZ_OUTPUT_TOKENS,
     QUOTA_MESSAGE,
@@ -1022,6 +1031,32 @@ class DatabaseTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(profile.json()["first_name"], "Саша")
             self.assertEqual(profile.json()["grade"], 6)
 
+    async def test_cabinet_tour_marks_only_the_session_user(self) -> None:
+        self.assertFalse((await self.db.get_user(1))["cabinet_tour"])
+        app = create_app(self.db, FakeTutor(), BOT_TOKEN)
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="https://cabinet") as anon:
+            page = await anon.get("/")
+            self.assertIn("Пропустить", page.text)
+            self.assertIn("Как устроен кабинет", page.text)
+            denied = await anon.post("/api/tour")
+            self.assertEqual(denied.status_code, 401)
+            self.assertFalse((await self.db.get_user(1))["cabinet_tour"])
+        async with AsyncClient(transport=transport, base_url="https://cabinet") as anya:
+            opened = await anya.post("/api/session", json={"init_data": _init_data(1, "Аня")})
+            self.assertEqual(opened.status_code, 200)
+            self.assertFalse((await anya.get("/api/profile")).json()["cabinet_tour"])
+            marked = await anya.post("/api/tour")
+            self.assertEqual(marked.status_code, 200)
+            self.assertTrue(marked.json()["ok"])
+            self.assertTrue((await anya.get("/api/profile")).json()["cabinet_tour"])
+        self.assertTrue((await self.db.get_user(1))["cabinet_tour"])
+        self.assertFalse((await self.db.get_user(2))["cabinet_tour"])
+        async with AsyncClient(transport=transport, base_url="https://cabinet") as borya:
+            opened = await borya.post("/api/session", json={"init_data": _init_data(2, "Боря")})
+            self.assertEqual(opened.status_code, 200)
+            self.assertFalse((await borya.get("/api/profile")).json()["cabinet_tour"])
+
     async def test_dossier_uses_only_this_student(self) -> None:
         await self.db.upsert_user(3, "")
         self.assertEqual(await student_dossier(self.db, 3), "")
@@ -1267,6 +1302,116 @@ class SkillTests(unittest.TestCase):
         self.assertTrue(all(allow(5, now=float(index)) for index in range(30)))
         self.assertFalse(allow(5, now=31))
         reset()
+
+
+class SkillGraphTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.db = Database(str(Path(self._tmp.name) / "tutor.db"))
+        await self.db.connect()
+        await self.db.upsert_user(1, "Аня")
+        await self.db.upsert_user(2, "Боря")
+        reset()
+
+    async def asyncTearDown(self) -> None:
+        await self.db.close()
+        self._tmp.cleanup()
+        reset()
+
+    async def test_graph_empty_for_new_user(self) -> None:
+        graph = await build_skill_graph(self.db, 1)
+        self.assertEqual(graph, {"nodes": [], "edges": [], "due_count": 0})
+        app = create_app(self.db, FakeTutor(), BOT_TOKEN)
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="https://cabinet") as client:
+            await client.post("/api/session", json={"init_data": _init_data(1, "Аня")})
+            response = await client.get("/api/skills/graph")
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.json()["nodes"], [])
+
+    async def test_graph_links_skill_to_open_error_and_hides_stranger(self) -> None:
+        past = (datetime.now(timezone.utc) - timedelta(days=3)).isoformat(timespec="seconds")
+        skill_id = await self.db.insert_skill(
+            1, "Алгебра", "Квадратные уравнения", 0.2, 1, past, past
+        )
+        other = await self.db.insert_skill(
+            2, "Физика", "Чужой приём", 0.9, 4, utcnow(), utcnow()
+        )
+        error_id = await self.db.insert_error(
+            1, "Алгебра", "x²=4", "забыл минус", "два корня", skill_id=skill_id
+        )
+        await self.db.insert_error(
+            2, "Физика", "чужая", "секрет", "не светить", skill_id=other
+        )
+        graph = await build_skill_graph(self.db, 1)
+        ids = {node["id"] for node in graph["nodes"]}
+        self.assertIn("subj:Алгебра", ids)
+        self.assertIn(f"skill:{skill_id}", ids)
+        self.assertIn(f"error:{error_id}", ids)
+        self.assertNotIn(f"skill:{other}", ids)
+        edges = {(edge["from"], edge["to"]) for edge in graph["edges"]}
+        self.assertIn(("subj:Алгебра", f"skill:{skill_id}"), edges)
+        self.assertIn((f"skill:{skill_id}", f"error:{error_id}"), edges)
+        skill_node = next(node for node in graph["nodes"] if node["id"] == f"skill:{skill_id}")
+        self.assertTrue(skill_node["due"])
+        self.assertEqual(skill_node["open_errors"], 1)
+        self.assertGreaterEqual(graph["due_count"], 1)
+
+        app = create_app(self.db, FakeTutor(), BOT_TOKEN)
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="https://cabinet") as client:
+            await client.post("/api/session", json={"init_data": _init_data(1, "Аня")})
+            mine = await client.get("/api/skills/graph")
+            self.assertEqual(mine.status_code, 200)
+            mine_ids = {node["id"] for node in mine.json()["nodes"]}
+            self.assertIn(f"skill:{skill_id}", mine_ids)
+            self.assertNotIn(f"skill:{other}", mine_ids)
+
+    async def test_skill_and_due_quiz_routes(self) -> None:
+        past = (datetime.now(timezone.utc) - timedelta(days=2)).isoformat(timespec="seconds")
+        skill_id = await self.db.insert_skill(
+            1, "Алгебра", "деление", 0.2, 1, past, past
+        )
+        await self.db.insert_error(
+            1, "Алгебра", "2x=4", "не разделил", "раздели обе части", skill_id=skill_id
+        )
+        foreign = await self.db.insert_skill(
+            2, "Физика", "сила", 0.2, 1, past, past
+        )
+        quiz_id = await start_skill_quiz(self.db, FakeTutor(), 1, skill_id)
+        self.assertIsNotNone(quiz_id)
+        missing = await start_skill_quiz(self.db, FakeTutor(), 1, foreign)
+        self.assertIsNone(missing)
+        due_id = await start_due_quiz(self.db, FakeTutor(), 1)
+        self.assertIsNotNone(due_id)
+
+        app = create_app(self.db, FakeTutor(), BOT_TOKEN)
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="https://cabinet") as client:
+            await client.post("/api/session", json={"init_data": _init_data(1, "Аня")})
+            ok = await client.post(f"/api/quizzes/skill/{skill_id}")
+            self.assertEqual(ok.status_code, 200)
+            self.assertIn("question", ok.json())
+            denied = await client.post(f"/api/quizzes/skill/{foreign}")
+            self.assertEqual(denied.status_code, 404)
+            due = await client.post("/api/quizzes/due")
+            self.assertEqual(due.status_code, 200)
+
+        fresh = await self.db.insert_skill(
+            1, "Геометрия", "уже крепкий", 1.0, 5, utcnow(),
+            (datetime.now(timezone.utc) + timedelta(days=10)).isoformat(timespec="seconds"),
+        )
+        await self.db.conn.execute("DELETE FROM skills WHERE id = ?", (skill_id,))
+        await self.db.conn.execute("DELETE FROM errors WHERE user_id = 1")
+        await self.db.conn.commit()
+        self.assertIsNotNone(await self.db.get_skill(1, fresh))
+        empty = await start_due_quiz(self.db, FakeTutor(), 1)
+        self.assertIsNone(empty)
+        async with AsyncClient(transport=transport, base_url="https://cabinet") as client:
+            await client.post("/api/session", json={"init_data": _init_data(1, "Аня")})
+            conflict = await client.post("/api/quizzes/due")
+            self.assertEqual(conflict.status_code, 409)
+            self.assertIn("нечего", conflict.json()["detail"].lower())
 
 
 class NoteQuizTests(unittest.IsolatedAsyncioTestCase):
@@ -1837,6 +1982,114 @@ class RenderCleanupTests(unittest.TestCase):
             next_question=None,
         )
         self.assertNotIn("Звезда", render_feedback(view))
+
+
+class DemoCabinetTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self) -> None:
+        reset()
+        self._tmp = tempfile.TemporaryDirectory()
+        self.db = Database(str(Path(self._tmp.name) / "tutor.db"))
+        await self.db.connect()
+        await self.db.upsert_user(1, "Аня")
+        await self.db.insert_note(1, "Секрет Бори", "Физика", "Чужой конспект.", "manual")
+
+    async def asyncTearDown(self) -> None:
+        reset()
+        await self.db.close()
+        self._tmp.cleanup()
+
+    async def test_demo_page_opens_filled_cabinet_without_init_data(self) -> None:
+        app = create_app(self.db, FakeTutor(), BOT_TOKEN)
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="https://cabinet") as client:
+            home = await client.get("/")
+            self.assertNotIn('name="lumi-demo"', home.text)
+            page = await client.get("/demo")
+            self.assertEqual(page.status_code, 200)
+            self.assertIn('name="lumi-demo"', page.text)
+            self.assertIn('id="gate" class="gate" hidden', page.text)
+            self.assertEqual((await client.get("/demo/")).status_code, 200)
+            self.assertEqual((await client.get("/api/profile")).status_code, 401)
+
+            opened = await client.post("/api/demo/session", json={"user_id": 1, "init_data": "nope"})
+            self.assertEqual(opened.status_code, 200)
+            cookie = opened.headers["set-cookie"]
+            self.assertIn("cabinet=", cookie)
+            self.assertIn("HttpOnly", cookie)
+            self.assertIn("Secure", cookie)
+
+            profile = await client.get("/api/profile")
+            self.assertEqual(profile.status_code, 200)
+            body = profile.json()
+            self.assertEqual(body["first_name"], "Маша")
+            self.assertEqual(body["grade"], 9)
+            self.assertEqual(body["exam_goal"], "oge")
+            self.assertEqual(body["explain_style"], "detail")
+            self.assertFalse(body["cabinet_tour"])
+            await client.post("/api/tour")
+            self.assertTrue((await client.get("/api/profile")).json()["cabinet_tour"])
+            await client.post("/api/demo/session")
+            self.assertFalse((await client.get("/api/profile")).json()["cabinet_tour"])
+            self.assertEqual(body["quizzes_done"], 4)
+            self.assertEqual(body["closed_errors"], 3)
+            self.assertEqual(body["accuracy"], 80)
+            self.assertEqual(body["streak_days"], 6)
+            self.assertNotIn("user_id", body)
+
+            home_stats = await client.get("/api/home")
+            self.assertEqual(home_stats.json()["open_errors"], 6)
+            self.assertEqual(home_stats.json()["streak_days"], 6)
+            self.assertEqual(home_stats.json()["week_done"], 4)
+
+            notes = await client.get("/api/notes")
+            self.assertEqual(notes.json()["total"], 10)
+            self.assertEqual(notes.json()["notes"][0]["title"], DEMO_NOTE)
+            self.assertTrue(notes.json()["notes"][0]["pinned"])
+            self.assertNotIn("Секрет", notes.text)
+
+            bank = await client.get("/api/errors")
+            self.assertEqual(bank.json()["counts"], {"new": 3, "active": 3, "closed": 3})
+            graph = await client.get("/api/skills/graph")
+            self.assertGreaterEqual(graph.json()["due_count"], 4)
+            self.assertTrue(any(node["kind"] == "error" for node in graph.json()["nodes"]))
+            self.assertNotIn("Секрет", graph.text)
+
+            found = await client.get("/api/search", params={"q": "Пифагора"})
+            self.assertEqual(found.status_code, 200)
+            self.assertIn("Теорема Пифагора", [item["title"] for item in found.json()])
+
+            again = await client.post("/api/demo/session")
+            self.assertEqual(again.status_code, 200)
+            self.assertEqual((await client.get("/api/notes")).json()["total"], 10)
+
+        own = await self.db.list_notes(1, 0, 10)
+        self.assertEqual([row["title"] for row in own], ["Секрет Бори"])
+        reminded = await self.db.users_to_remind("2099-01-01")
+        self.assertFalse(any(int(row["user_id"]) == DEMO_USER_ID for row in reminded))
+
+    async def test_demo_account_stays_available_on_allowlist(self) -> None:
+        app = create_app(self.db, FakeTutor(), BOT_TOKEN, {1})
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="https://cabinet") as client:
+            opened = await client.post("/api/demo/session")
+            self.assertEqual(opened.status_code, 200)
+            profile = await client.get("/api/profile")
+            self.assertEqual(profile.status_code, 200)
+            self.assertEqual(profile.json()["first_name"], "Маша")
+            blocked = await client.post("/api/session", json={"init_data": _init_data(99, "Гость")})
+            self.assertEqual(blocked.status_code, 403)
+
+        await self.db.conn.execute(
+            "DELETE FROM notes WHERE user_id = ? AND title = ?",
+            (DEMO_USER_ID, DEMO_NOTE),
+        )
+        await self.db.conn.commit()
+        await ensure_demo(self.db)
+        titles = {row["title"] for row in await self.db.list_notes(DEMO_USER_ID, 0, 100)}
+        self.assertIn(DEMO_NOTE, titles)
+        self.assertEqual(len(titles), 10)
+        own = await self.db.list_notes(1, 0, 10)
+        self.assertEqual(own[0]["title"], "Секрет Бори")
 
 
 class WebAppTests(unittest.TestCase):

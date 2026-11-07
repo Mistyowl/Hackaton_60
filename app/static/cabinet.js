@@ -3,9 +3,11 @@ const DENIED = "Кабинет пока открыт только для уча�
 const NO_CHAT = "Напиши Люми в чате MAX — там можно спросить задачу или прислать фото.";
 const EMPTY_NOTES = "Конспекты появятся, когда в чате нажмёшь «В конспект».";
 const EMPTY_ERRORS = "Банк ошибок пуст. Ошибки появятся после квиза или проверки решения в чате.";
+const EMPTY_GRAPH = "Пока карта пустая. Сфоткай задачу в чате или пройди квиз.";
 const EMPTY_CALENDAR = "Пока нечего ставить в календарь.";
 const CALENDAR_OPENED = "В Календаре нажми «Найти», потом «Добавить подписку».";
 const CALENDAR_READY = "Готово — нажми «В календарь» ещё раз.";
+const GRAPH_FOCUS = "#7f6df2";
 const CHEV = '<span class="chev"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 6l6 6-6 6"/></svg></span>';
 const PIN = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 4h6l-1 7 3 3v2H7v-2l3-3-1-7z"/><path d="M12 16v5"/></svg>';
 const MARK = '<span class="mark"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M5 12l5 5L20 7"/></svg></span>';
@@ -28,7 +30,7 @@ let savedProfile = "";
 const state = {
   profile: {
     first_name: "", grade: null, explain_style: null, exam_goal: null, reminders: true,
-    quizzes_done: 0, closed_errors: 0, accuracy: 0, streak_days: 0
+    quizzes_done: 0, closed_errors: 0, accuracy: 0, streak_days: 0, cabinet_tour: false
   },
   home: { open_errors: 0, streak_days: 0, week_done: 0, week_goal: 5 },
   notes: [],
@@ -44,7 +46,11 @@ const state = {
   loadingFrom: "quiz",
   screen: "home",
   calendarUrl: null,
-  calendarHttpsUrl: null
+  calendarHttpsUrl: null,
+  graph: { nodes: [], edges: [], due_count: 0 },
+  graphFocus: null,
+  graphReturn: "quiz-errors",
+  graphSkillId: null
 };
 let quiz = null;
 let currentNote = null;
@@ -52,6 +58,9 @@ let quizToken = 0;
 let noteTicket = 0;
 let errorsTicket = 0;
 let searchTicket = 0;
+let graphTicket = 0;
+let graphAnim = 0;
+let graphSim = null;
 const deletingNotes = new Set();
 const pinningNotes = new Set();
 let swipeDrag = null;
@@ -155,7 +164,11 @@ function backToChat(text) {
 function tabFor(screen) {
   if (screen === "notes" || screen === "note" || screen === "note-new") return "notes";
   if (screen === "profile") return "profile";
-  if (screen === "quiz-errors" || ((screen === "quiz-play" || screen === "quiz-loading") && state.quizKind === "errors")) return "errors";
+  if (
+    screen === "quiz-errors"
+    || screen === "skills-graph"
+    || ((screen === "quiz-play" || screen === "quiz-loading") && (state.quizKind === "errors" || state.quizKind === "skill" || state.quizKind === "due"))
+  ) return "errors";
   if (screen === "quiz" || screen.startsWith("quiz-")) return "quiz";
   return "home";
 }
@@ -185,6 +198,7 @@ function showScreen(name) {
   });
   document.body.classList.toggle("home-open", name === "home");
   document.body.classList.toggle("quiz-open", name === "quiz");
+  document.body.classList.toggle("graph-open", name === "skills-graph");
   const roots = ["home", "notes", "quiz", "quiz-errors", "profile"];
   const app = bridge();
   if (app && app.BackButton) {
@@ -199,6 +213,11 @@ function showScreen(name) {
   else clearInterval(loadingTimer);
   if (name === "home" || name === "quiz") refreshHome().catch(() => {});
   if (name === "quiz") paintQuizSetup();
+  if (name === "skills-graph") {
+    startGraphView();
+  } else {
+    stopGraphView();
+  }
 }
 
 const LOADING_TIPS = [
@@ -227,11 +246,14 @@ function cancelQuizLoading() {
   document.querySelector("#start-setup").disabled = false;
   document.querySelector("#start-topic").disabled = state.selectedNoteId == null;
   document.querySelector("#start-errors").disabled = !state.errors.some((row) => row.status !== "closed");
-  showScreen(state.loadingFrom || "quiz");
+  const back = state.loadingFrom || "quiz";
+  showScreen(back);
+  if (back === "skills-graph") paintGraphChrome();
 }
 
 function quizOrigin() {
   if (quiz && quiz.origin && quiz.origin !== "quiz-loading" && quiz.origin !== "quiz-play") return quiz.origin;
+  if (state.quizKind === "skill" || state.quizKind === "due") return "skills-graph";
   return state.quizKind === "errors" ? "quiz-errors" : "quiz";
 }
 
@@ -241,12 +263,486 @@ function goBack() {
     cancelNoteEdit();
     return;
   }
+  if (screen === "skills-graph") {
+    if (!document.querySelector("#graph-sheet").hidden) {
+      closeGraphSheet();
+      return;
+    }
+    showScreen(state.graphReturn || "quiz-errors");
+    return;
+  }
   if (screen === "note") showScreen(state.noteReturn || "notes");
   else if (screen === "quiz-loading") cancelQuizLoading();
   else if (screen === "quiz-play") showScreen(quizOrigin());
   else if (screen === "quiz-topic" || screen === "quiz-errors") showScreen(state.quizReturn || "home");
   else if (screen === "note-new") showScreen("notes");
   else showScreen("home");
+}
+
+function closeGraphSheet() {
+  state.graphFocus = null;
+  document.querySelector("#graph-sheet").hidden = true;
+  if (graphSim) graphSim.needsDraw = true;
+}
+
+function openSkillsGraph(from) {
+  state.graphReturn = from || "quiz-errors";
+  state.graphFocus = null;
+  document.querySelector("#graph-sheet").hidden = true;
+  document.querySelector("#graph-status").hidden = true;
+  showScreen("skills-graph");
+  refreshSkillsGraph().catch(() => showGate("Кабинет не смог открыть базу."));
+}
+
+async function refreshSkillsGraph(focusSkillId) {
+  const ticket = ++graphTicket;
+  const response = await fetch("/api/skills/graph");
+  if (ticket !== graphTicket) return;
+  if (locked(response)) return;
+  if (!response.ok) {
+    document.querySelector("#graph-status").hidden = false;
+    document.querySelector("#graph-status").textContent = "Не удалось загрузить карту.";
+    return;
+  }
+  const data = await response.json();
+  if (ticket !== graphTicket) return;
+  state.graph = {
+    nodes: Array.isArray(data.nodes) ? data.nodes : [],
+    edges: Array.isArray(data.edges) ? data.edges : [],
+    due_count: Number(data.due_count || 0)
+  };
+  if (focusSkillId != null) state.graphFocus = "skill:" + focusSkillId;
+  else if (state.graphFocus && !state.graph.nodes.some((node) => node.id === state.graphFocus)) {
+    state.graphFocus = null;
+  }
+  paintGraphChrome();
+  if (state.screen === "skills-graph") startGraphView();
+}
+
+function paintGraphChrome() {
+  const empty = !state.graph.nodes.length;
+  document.querySelector("#graph-empty").hidden = !empty;
+  document.querySelector("#graph-due").disabled = empty || !state.graph.due_count;
+  document.querySelector("#graph-hint").textContent = empty
+    ? "Карта появится после первой ошибки или квиза"
+    : (state.graph.due_count
+      ? ("Пора повторить: " + state.graph.due_count)
+      : "Тапни приём, чтобы повторить");
+  if (state.graphFocus) {
+    const node = state.graph.nodes.find((item) => item.id === state.graphFocus && item.kind === "skill");
+    if (node) openGraphSheet(node);
+    else closeGraphSheet();
+  } else {
+    document.querySelector("#graph-sheet").hidden = true;
+  }
+}
+
+function openGraphSheet(node) {
+  state.graphFocus = node.id;
+  state.graphSkillId = node.skill_id;
+  document.querySelector("#graph-sheet-subject").textContent = node.subject || "";
+  document.querySelector("#graph-sheet-title").textContent = node.label || "Приём";
+  const errors = Number(node.open_errors || 0);
+  const status = node.due ? "Пора повторить" : "Закрепляется";
+  const errText = errors
+    ? (errors + " " + ruCount(errors, "ошибка", "ошибки", "ошибок") + " в банке")
+    : "Открытых ошибок нет";
+  document.querySelector("#graph-sheet-status").textContent = status + " · " + errText;
+  document.querySelector("#graph-sheet").hidden = false;
+  if (graphSim) graphSim.needsDraw = true;
+}
+
+function nodeRadius(node) {
+  if (node.kind === "subject") return 10 + Math.min(8, (node.links || 1));
+  if (node.kind === "skill") return 7 + Math.min(6, Number(node.open_errors || 0)) + (node.due ? 1 : 0);
+  return 4.5;
+}
+
+function startGraphView() {
+  stopGraphView();
+  const canvas = document.querySelector("#graph-canvas");
+  if (!canvas || state.screen !== "skills-graph") return;
+  const ctx = canvas.getContext("2d");
+  const nodes = state.graph.nodes.map((raw, index) => {
+    const angle = (index / Math.max(1, state.graph.nodes.length)) * Math.PI * 2;
+    return {
+      ...raw,
+      x: Math.cos(angle) * (80 + (index % 5) * 18),
+      y: Math.sin(angle) * (80 + (index % 7) * 14),
+      vx: 0,
+      vy: 0,
+      links: 0
+    };
+  });
+  const byId = new Map(nodes.map((node) => [node.id, node]));
+  const edges = state.graph.edges
+    .map((edge) => ({ source: byId.get(edge.from), target: byId.get(edge.to) }))
+    .filter((edge) => edge.source && edge.target);
+  edges.forEach((edge) => {
+    edge.source.links += 1;
+    edge.target.links += 1;
+  });
+  let width = 0;
+  let height = 0;
+  let dpr = 1;
+  let scale = 1;
+  let offsetX = 0;
+  let offsetY = 0;
+  let dragging = null;
+  let panning = false;
+  let moved = false;
+  let lastX = 0;
+  let lastY = 0;
+  let pinch = null;
+  let pulse = 0;
+
+  function resize() {
+    dpr = Math.max(1, window.devicePixelRatio || 1);
+    width = canvas.clientWidth || window.innerWidth;
+    height = canvas.clientHeight || window.innerHeight;
+    canvas.width = Math.floor(width * dpr);
+    canvas.height = Math.floor(height * dpr);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    if (graphSim) graphSim.needsDraw = true;
+  }
+
+  function screenToWorld(x, y) {
+    return {
+      x: (x - width / 2 - offsetX) / scale,
+      y: (y - height / 2 - offsetY) / scale
+    };
+  }
+
+  function hitTest(x, y) {
+    const point = screenToWorld(x, y);
+    let best = null;
+    let bestDist = Infinity;
+    nodes.forEach((node) => {
+      const dx = node.x - point.x;
+      const dy = node.y - point.y;
+      const dist = Math.sqrt(dx * dx + dy * dy);
+      const hit = nodeRadius(node) + 8 / scale;
+      if (dist <= hit && dist < bestDist) {
+        best = node;
+        bestDist = dist;
+      }
+    });
+    return best;
+  }
+
+  function step() {
+    const alpha = 0.08;
+    for (let i = 0; i < nodes.length; i += 1) {
+      for (let j = i + 1; j < nodes.length; j += 1) {
+        const a = nodes[i];
+        const b = nodes[j];
+        let dx = a.x - b.x;
+        let dy = a.y - b.y;
+        let dist = Math.sqrt(dx * dx + dy * dy) || 0.01;
+        const min = (nodeRadius(a) + nodeRadius(b)) * 3.2;
+        const force = 420 / (dist * dist);
+        const fx = (dx / dist) * force;
+        const fy = (dy / dist) * force;
+        a.vx += fx;
+        a.vy += fy;
+        b.vx -= fx;
+        b.vy -= fy;
+        if (dist < min) {
+          const push = (min - dist) * 0.05;
+          a.vx += (dx / dist) * push;
+          a.vy += (dy / dist) * push;
+          b.vx -= (dx / dist) * push;
+          b.vy -= (dy / dist) * push;
+        }
+      }
+    }
+    edges.forEach((edge) => {
+      const a = edge.source;
+      const b = edge.target;
+      const dx = b.x - a.x;
+      const dy = b.y - a.y;
+      const dist = Math.sqrt(dx * dx + dy * dy) || 0.01;
+      const rest = edge.target.kind === "error" ? 58 : 96;
+      const pull = (dist - rest) * 0.012;
+      const fx = (dx / dist) * pull;
+      const fy = (dy / dist) * pull;
+      a.vx += fx;
+      a.vy += fy;
+      b.vx -= fx;
+      b.vy -= fy;
+    });
+    nodes.forEach((node) => {
+      node.vx += -node.x * 0.003;
+      node.vy += -node.y * 0.003;
+      node.vx *= 0.86;
+      node.vy *= 0.86;
+      if (!dragging || dragging.id !== node.id) {
+        node.x += node.vx * alpha * 12;
+        node.y += node.vy * alpha * 12;
+      }
+    });
+  }
+
+  function draw() {
+    ctx.clearRect(0, 0, width, height);
+    ctx.fillStyle = "#1e1e1e";
+    ctx.fillRect(0, 0, width, height);
+    ctx.save();
+    ctx.translate(width / 2 + offsetX, height / 2 + offsetY);
+    ctx.scale(scale, scale);
+    const focus = state.graphFocus;
+    const linked = new Set();
+    if (focus) {
+      linked.add(focus);
+      edges.forEach((edge) => {
+        if (edge.source.id === focus || edge.target.id === focus) {
+          linked.add(edge.source.id);
+          linked.add(edge.target.id);
+        }
+      });
+    }
+    edges.forEach((edge) => {
+      const active = focus && (edge.source.id === focus || edge.target.id === focus);
+      ctx.beginPath();
+      ctx.moveTo(edge.source.x, edge.source.y);
+      ctx.lineTo(edge.target.x, edge.target.y);
+      ctx.strokeStyle = active ? GRAPH_FOCUS : "rgba(255,255,255,0.12)";
+      ctx.lineWidth = (active ? 1.6 : 1) / scale;
+      ctx.globalAlpha = focus && !active ? 0.25 : 1;
+      ctx.stroke();
+      ctx.globalAlpha = 1;
+    });
+    nodes.forEach((node) => {
+      const active = focus === node.id;
+      const dimmed = focus && !linked.has(node.id);
+      const radius = nodeRadius(node);
+      let fill = "#d8d8d8";
+      let alpha = 1;
+      if (node.kind === "subject") fill = "#f5f5f5";
+      if (node.kind === "skill") {
+        const bright = Math.max(0.25, Math.min(1, Number(node.brightness || 0.5)));
+        alpha = bright;
+        fill = active ? GRAPH_FOCUS : "#eaeaea";
+      }
+      if (node.kind === "error") {
+        fill = active ? GRAPH_FOCUS : "#9a9a9a";
+        alpha = 0.85;
+      }
+      if (dimmed) alpha *= 0.28;
+      ctx.beginPath();
+      ctx.arc(node.x, node.y, radius, 0, Math.PI * 2);
+      ctx.fillStyle = fill;
+      ctx.globalAlpha = alpha;
+      ctx.fill();
+      if (node.kind === "skill" && node.due) {
+        ctx.globalAlpha = dimmed ? 0.25 : (0.55 + 0.35 * Math.sin(pulse));
+        ctx.strokeStyle = GRAPH_FOCUS;
+        ctx.lineWidth = 1.8 / scale;
+        ctx.beginPath();
+        ctx.arc(node.x, node.y, radius + 3.5, 0, Math.PI * 2);
+        ctx.stroke();
+      }
+      if (active) {
+        ctx.globalAlpha = 1;
+        ctx.strokeStyle = GRAPH_FOCUS;
+        ctx.lineWidth = 2.2 / scale;
+        ctx.beginPath();
+        ctx.arc(node.x, node.y, radius + 2, 0, Math.PI * 2);
+        ctx.stroke();
+      }
+      const showLabel = !focus || linked.has(node.id) || node.kind === "subject";
+      if (showLabel && scale > 0.55) {
+        ctx.globalAlpha = dimmed ? 0.25 : (active || node.kind === "subject" ? 0.95 : 0.7);
+        ctx.fillStyle = "#f0f0f0";
+        ctx.font = `${Math.max(10, 12 / scale)}px -apple-system, BlinkMacSystemFont, Roboto, sans-serif`;
+        ctx.textAlign = "left";
+        ctx.textBaseline = "middle";
+        const label = String(node.label || "").slice(0, 28);
+        ctx.fillText(label, node.x + radius + 6, node.y);
+      }
+      ctx.globalAlpha = 1;
+    });
+    ctx.restore();
+  }
+
+  function frame() {
+    if (!graphSim) return;
+    pulse += 0.05;
+    for (let i = 0; i < 2; i += 1) step();
+    draw();
+    graphAnim = requestAnimationFrame(frame);
+  }
+
+  function pointerPos(event) {
+    const rect = canvas.getBoundingClientRect();
+    const touch = event.touches && event.touches[0];
+    const clientX = touch ? touch.clientX : event.clientX;
+    const clientY = touch ? touch.clientY : event.clientY;
+    return { x: clientX - rect.left, y: clientY - rect.top };
+  }
+
+  function onPointerDown(event) {
+    if (event.touches && event.touches.length === 2) {
+      const a = event.touches[0];
+      const b = event.touches[1];
+      const dist = Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY);
+      pinch = { dist, scale };
+      dragging = null;
+      panning = false;
+      return;
+    }
+    const pos = pointerPos(event);
+    const hit = hitTest(pos.x, pos.y);
+    moved = false;
+    lastX = pos.x;
+    lastY = pos.y;
+    if (hit && hit.kind === "skill") {
+      dragging = hit;
+      hit.vx = 0;
+      hit.vy = 0;
+    } else {
+      panning = true;
+      dragging = null;
+    }
+  }
+
+  function onPointerMove(event) {
+    if (event.touches && event.touches.length === 2 && pinch) {
+      event.preventDefault();
+      const a = event.touches[0];
+      const b = event.touches[1];
+      const dist = Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY);
+      scale = Math.max(0.45, Math.min(2.4, pinch.scale * (dist / Math.max(1, pinch.dist))));
+      return;
+    }
+    if (!dragging && !panning) return;
+    event.preventDefault();
+    const pos = pointerPos(event);
+    const dx = pos.x - lastX;
+    const dy = pos.y - lastY;
+    if (Math.abs(dx) + Math.abs(dy) > 3) moved = true;
+    if (dragging) {
+      const world = screenToWorld(pos.x, pos.y);
+      dragging.x = world.x;
+      dragging.y = world.y;
+      dragging.vx = 0;
+      dragging.vy = 0;
+    } else if (panning) {
+      offsetX += dx;
+      offsetY += dy;
+    }
+    lastX = pos.x;
+    lastY = pos.y;
+  }
+
+  function onPointerUp(event) {
+    if (event.touches && event.touches.length >= 2) return;
+    if (!moved) {
+      const pos = pointerPos(event.changedTouches ? event.changedTouches[0] : event);
+      const rect = canvas.getBoundingClientRect();
+      const local = event.changedTouches
+        ? { x: event.changedTouches[0].clientX - rect.left, y: event.changedTouches[0].clientY - rect.top }
+        : pos;
+      const hit = hitTest(local.x, local.y);
+      if (hit && hit.kind === "skill") openGraphSheet(hit);
+      else if (hit && hit.kind === "error" && hit.skill_id) {
+        const skill = nodes.find((node) => node.kind === "skill" && Number(node.skill_id) === Number(hit.skill_id));
+        if (skill) openGraphSheet(skill);
+      } else closeGraphSheet();
+    }
+    dragging = null;
+    panning = false;
+    pinch = null;
+  }
+
+  function onWheel(event) {
+    event.preventDefault();
+    const next = scale * (event.deltaY < 0 ? 1.08 : 0.92);
+    scale = Math.max(0.45, Math.min(2.4, next));
+  }
+
+  canvas.addEventListener("mousedown", onPointerDown);
+  window.addEventListener("mousemove", onPointerMove);
+  window.addEventListener("mouseup", onPointerUp);
+  canvas.addEventListener("touchstart", onPointerDown, { passive: false });
+  canvas.addEventListener("touchmove", onPointerMove, { passive: false });
+  canvas.addEventListener("touchend", onPointerUp);
+  canvas.addEventListener("wheel", onWheel, { passive: false });
+
+  const onResize = () => resize();
+  window.addEventListener("resize", onResize);
+  graphSim = {
+    needsDraw: true,
+    onResize,
+    destroy() {
+      canvas.removeEventListener("mousedown", onPointerDown);
+      window.removeEventListener("mousemove", onPointerMove);
+      window.removeEventListener("mouseup", onPointerUp);
+      canvas.removeEventListener("touchstart", onPointerDown);
+      canvas.removeEventListener("touchmove", onPointerMove);
+      canvas.removeEventListener("touchend", onPointerUp);
+      canvas.removeEventListener("wheel", onWheel);
+      window.removeEventListener("resize", onResize);
+    }
+  };
+  resize();
+  frame();
+}
+
+function stopGraphView() {
+  if (graphAnim) {
+    cancelAnimationFrame(graphAnim);
+    graphAnim = 0;
+  }
+  if (graphSim && graphSim.destroy) graphSim.destroy();
+  else if (graphSim && graphSim.onResize) window.removeEventListener("resize", graphSim.onResize);
+  graphSim = null;
+}
+
+async function startGraphQuiz(kind, skillId) {
+  const token = ++quizToken;
+  const status = document.querySelector("#graph-status");
+  let url = "/api/quizzes/due";
+  let fallback = "Повторить сегодня";
+  if (kind === "skill") {
+    if (skillId == null) return;
+    url = "/api/quizzes/skill/" + encodeURIComponent(skillId);
+    const node = state.graph.nodes.find((item) => Number(item.skill_id) === Number(skillId));
+    fallback = node && node.label ? ("Повторить: " + node.label) : "Повторить приём";
+  }
+  status.hidden = true;
+  status.textContent = "";
+  state.loadingFrom = "skills-graph";
+  showScreen("quiz-loading");
+  try {
+    const response = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: "{}"
+    });
+    const data = await response.json().catch(() => ({}));
+    if (token !== quizToken) return;
+    if (locked(response)) return;
+    if (!response.ok) {
+      showScreen("skills-graph");
+      const message = detailText(data, "Квиз не собрался.");
+      status.hidden = false;
+      status.textContent = message;
+      showToast(message);
+      return;
+    }
+    beginQuiz(kind, data, fallback, token, {
+      origin: "skills-graph",
+      skillId: skillId != null ? Number(skillId) : null
+    });
+  } catch (error) {
+    if (token !== quizToken) return;
+    showScreen("skills-graph");
+    status.hidden = false;
+    status.textContent = "Не удалось дождаться квиза.";
+    showToast("Не удалось дождаться квиза.");
+    throw error;
+  }
 }
 
 function ruCount(count, one, few, many) {
@@ -1378,6 +1874,10 @@ async function submitAnswer() {
     if (quiz.finished) {
       refreshProfile().catch(() => {});
       refreshHome().catch(() => {});
+      if (quiz.origin === "skills-graph" || quiz.kind === "skill" || quiz.kind === "due") {
+        const focusId = data.skill_id || (quiz.skillIds && quiz.skillIds[0]) || quiz.skillId;
+        refreshSkillsGraph(focusId).catch(() => {});
+      }
     }
   } finally {
     if (quiz && quiz.token === token) {
@@ -1406,6 +1906,7 @@ async function loadCabinet() {
   paintTopics();
   showCabinet();
   showScreen("home");
+  if (!state.profile.cabinet_tour) startTour();
 }
 
 function setSwipeOpen(row, side) {
@@ -1822,6 +2323,16 @@ document.querySelector("#topic-list").addEventListener("click", (event) => {
 });
 document.querySelector("#start-topic").addEventListener("click", () => startQuiz("topic").catch(() => showGate("Кабинет не смог открыть базу.")));
 document.querySelector("#start-errors").addEventListener("click", () => startQuiz("errors").catch(() => showGate("Кабинет не смог открыть базу.")));
+document.querySelector("#open-graph").addEventListener("click", () => openSkillsGraph("quiz-errors"));
+document.querySelector("#graph-back").addEventListener("click", () => showScreen(state.graphReturn || "quiz-errors"));
+document.querySelector("#graph-empty-back").addEventListener("click", () => showScreen(state.graphReturn || "quiz-errors"));
+document.querySelector("#graph-due").addEventListener("click", () => {
+  startGraphQuiz("due").catch(() => showGate("Кабинет не смог открыть базу."));
+});
+document.querySelector("#graph-sheet-go").addEventListener("click", () => {
+  if (state.graphSkillId == null) return;
+  startGraphQuiz("skill", state.graphSkillId).catch(() => showGate("Кабинет не смог открыть базу."));
+});
 document.querySelector("#export-calendar").addEventListener("click", () => downloadCalendar().catch(() => showGate("Кабинет не смог открыть базу.")));
 document.querySelector("#quiz-options").addEventListener("click", (event) => {
   const button = event.target.closest("[data-option]");
@@ -1842,11 +2353,19 @@ document.querySelector("#quiz-go").addEventListener("click", () => {
 document.querySelector("#quiz-again").addEventListener("click", () => {
   if (!quiz) return;
   if (quiz.setup) startSetupQuiz().catch(() => showGate("Кабинет не смог открыть базу."));
+  else if (quiz.kind === "skill") startGraphQuiz("skill", quiz.skillId).catch(() => showGate("Кабинет не смог открыть базу."));
+  else if (quiz.kind === "due") startGraphQuiz("due").catch(() => showGate("Кабинет не смог открыть базу."));
   else if (quiz.kind === "topic") startQuiz("topic").catch(() => showGate("Кабинет не смог открыть базу."));
   else startQuiz("errors").catch(() => showGate("Кабинет не смог открыть базу."));
 });
 document.querySelector("#quiz-cancel").addEventListener("click", cancelQuizLoading);
-document.querySelector("#quiz-retry").addEventListener("click", () => startQuiz("errors").catch(() => showGate("Кабинет не смог открыть базу.")));
+document.querySelector("#quiz-retry").addEventListener("click", () => {
+  if (quiz && (quiz.kind === "skill" || quiz.kind === "due")) {
+    showScreen("skills-graph");
+    return;
+  }
+  startQuiz("errors").catch(() => showGate("Кабинет не смог открыть базу."));
+});
 document.querySelector("#quiz-chat").addEventListener("click", () => {
   backToChat("Открываю чат — спроси Люми про трудный вопрос.");
 });
@@ -2043,6 +2562,184 @@ document.querySelector("#profile-form").addEventListener("submit", async (event)
   }
 });
 
+const TOUR_STEPS = [
+  {
+    screen: "home",
+    anchor: ".quick-grid",
+    text: "С этих кнопок можно сразу начать: квиз по теме, квиз по ошибкам, новый конспект или вопрос Люми в чате."
+  },
+  {
+    screen: "home",
+    anchor: "#tabs",
+    text: "Внизу пять разделов. Сейчас ты на главной, дальше покажу остальные."
+  },
+  {
+    screen: "notes",
+    anchor: ".notes-head, label.search",
+    text: "Здесь твои конспекты. Можно искать по тексту или добавить новый."
+  },
+  {
+    screen: "quiz",
+    anchor: "#subject-grid",
+    text: "Выбери предмет и тему. Люми соберёт квиз по программе класса."
+  },
+  {
+    screen: "quiz-errors",
+    anchor: ".bank-head",
+    text: "Здесь ошибки из проверок. «Тренировка» закрепляет их, а «Карта» собирает приёмы в схему."
+  },
+  {
+    screen: "skills-graph",
+    anchor: "#graph-canvas",
+    text: "Это карта приёмов. Точка — один приём, линия — что с ним связано. Нажми точку, чтобы повторить, или «Повторить сегодня», если тему пора вернуть."
+  },
+  {
+    screen: "profile",
+    anchor: "#grade-row",
+    text: "Люми подстраивается под тебя: по классу и цели подбирает задачи, по стилю — объясняет короче или подробнее. Напоминания про ошибки можно выключить."
+  }
+];
+let tourIndex = -1;
+
+function startTour() {
+  tourIndex = 0;
+  showTourStep();
+}
+
+function clearTourShift() {
+  const main = document.querySelector("main");
+  if (main) main.style.paddingTop = "";
+}
+
+function hideTourSystemBack() {
+  const app = bridge();
+  if (app && app.BackButton && app.BackButton.hide) app.BackButton.hide();
+}
+
+function showTourStep() {
+  const index = tourIndex;
+  const step = TOUR_STEPS[index];
+  if (!step) return;
+  clearTourShift();
+  document.querySelector("#tour-step").textContent = (index + 1) + " из " + TOUR_STEPS.length;
+  document.querySelector("#tour-text").textContent = step.text;
+  document.querySelector("#tour-next").textContent = index === TOUR_STEPS.length - 1 ? "Понятно" : "Дальше";
+  document.querySelector("#tour-back").hidden = index === 0;
+  if (step.screen === "skills-graph") {
+    if (state.screen !== "skills-graph") openSkillsGraph("quiz-errors");
+  } else if (state.screen !== step.screen) {
+    showScreen(step.screen);
+  }
+  hideTourSystemBack();
+  const first = document.querySelector(step.anchor.split(",")[0].trim());
+  if (first && step.anchor !== "#tabs" && step.screen !== "skills-graph") {
+    first.scrollIntoView({ block: "nearest" });
+  }
+  requestAnimationFrame(() => {
+    if (tourIndex !== index) return;
+    const root = document.querySelector("#tour");
+    root.hidden = false;
+    document.body.classList.add("tour-open");
+    placeTourHole(step);
+  });
+}
+
+function anchorBox(nodes) {
+  let top = Infinity;
+  let left = Infinity;
+  let right = -Infinity;
+  let bottom = -Infinity;
+  nodes.forEach((node) => {
+    const rect = node.getBoundingClientRect();
+    if (!rect.width && !rect.height) return;
+    top = Math.min(top, rect.top);
+    left = Math.min(left, rect.left);
+    right = Math.max(right, rect.right);
+    bottom = Math.max(bottom, rect.bottom);
+  });
+  return { top, left, right, bottom };
+}
+
+function placeTourHole(step) {
+  const nodes = Array.from(document.querySelectorAll(step.anchor));
+  const hole = document.querySelector("#tour-hole");
+  const card = document.querySelector("#tour-card");
+  const pad = 8;
+  const gap = 12;
+  const inset = 16;
+  const tabsShown = getComputedStyle(tabs).display !== "none" && tabs.getBoundingClientRect().height > 0;
+  const floor = tabsShown ? tabs.getBoundingClientRect().top : window.innerHeight - 12;
+  let cardTop = floor - gap - card.offsetHeight;
+  if (step.screen === "skills-graph") {
+    hole.hidden = true;
+    card.style.top = Math.max(12, cardTop) + "px";
+    card.style.bottom = "auto";
+    return;
+  }
+  clearTourShift();
+  let box = anchorBox(nodes);
+  if (box.top !== Infinity && box.top - pad < inset) {
+    const main = document.querySelector("main");
+    const base = parseFloat(getComputedStyle(main).paddingTop) || 0;
+    main.style.paddingTop = (base + (inset - (box.top - pad))) + "px";
+    box = anchorBox(nodes);
+  }
+  if (box.top !== Infinity) {
+    const holeTop = Math.max(inset, box.top - pad);
+    const holeLeft = Math.max(8, box.left - pad);
+    const holeRight = Math.min(window.innerWidth - 8, box.right + pad);
+    const holeBottom = box.bottom + pad;
+    hole.hidden = false;
+    hole.style.top = holeTop + "px";
+    hole.style.left = holeLeft + "px";
+    hole.style.width = Math.max(24, holeRight - holeLeft) + "px";
+    hole.style.height = Math.max(24, holeBottom - holeTop) + "px";
+    const overlaps = cardTop + card.offsetHeight > holeTop && cardTop < holeBottom;
+    if (overlaps) {
+      const above = holeTop - gap - card.offsetHeight;
+      cardTop = above >= inset ? above : Math.min(holeBottom + gap, window.innerHeight - card.offsetHeight - 12);
+    }
+  } else {
+    hole.hidden = true;
+  }
+  card.style.top = Math.max(12, cardTop) + "px";
+  card.style.bottom = "auto";
+}
+
+function finishTour() {
+  if (tourIndex < 0) return;
+  tourIndex = -1;
+  clearTourShift();
+  document.querySelector("#tour").hidden = true;
+  document.body.classList.remove("tour-open");
+  if (state.screen !== "home") showScreen("home");
+  fetch("/api/tour", { method: "POST" })
+    .then((response) => {
+      if (response.ok) state.profile.cabinet_tour = true;
+    })
+    .catch(() => {});
+}
+
+document.querySelector("#tour-skip").addEventListener("click", finishTour);
+document.querySelector("#tour-next").addEventListener("click", () => {
+  if (tourIndex < 0) return;
+  if (tourIndex >= TOUR_STEPS.length - 1) finishTour();
+  else {
+    tourIndex += 1;
+    showTourStep();
+  }
+});
+document.querySelector("#tour-back").addEventListener("click", () => {
+  if (tourIndex <= 0) return;
+  tourIndex -= 1;
+  showTourStep();
+});
+document.querySelector("#tour-replay").addEventListener("click", startTour);
+window.addEventListener("resize", () => {
+  if (tourIndex < 0) return;
+  placeTourHole(TOUR_STEPS[tourIndex]);
+});
+
 const app = bridge();
 if (app && app.BackButton && app.BackButton.onClick) app.BackButton.onClick(goBack);
 
@@ -2074,6 +2771,10 @@ async function ensureFreshBuild() {
   return true;
 }
 
+function isDemo() {
+  return Boolean(document.querySelector('meta[name="lumi-demo"]'));
+}
+
 async function enter() {
   if (await ensureFreshBuild()) return;
   const webApp = bridge();
@@ -2081,7 +2782,10 @@ async function enter() {
   if (webApp && typeof webApp.ready === "function") webApp.ready();
   if (webApp && typeof webApp.setHeaderColor === "function") webApp.setHeaderColor("#f7f6fb");
   if (webApp && typeof webApp.setBackgroundColor === "function") webApp.setBackgroundColor("#f7f6fb");
-  if (initData) {
+  if (isDemo()) {
+    const response = await fetch("/api/demo/session", { method: "POST" });
+    if (!response.ok) return showGate("Демо-кабинет сейчас недоступен.");
+  } else if (initData) {
     const response = await fetch("/api/session", {
       method: "POST",
       headers: { "Content-Type": "application/json" },

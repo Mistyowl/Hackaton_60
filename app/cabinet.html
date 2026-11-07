@@ -208,6 +208,7 @@
         </form>
         <h2>Достижения</h2>
         <div class="achievements" id="achievements"></div>
+        <button type="button" class="tour-replay" id="tour-replay">Как устроен кабинет</button>
       </section>
 
       <section data-screen="quiz" class="quiz-home tab-screen" hidden>
@@ -258,10 +259,13 @@
       <section data-screen="quiz-errors" class="tab-screen" hidden>
         <div class="top bank-head">
           <h1 class="home-title">Банк ошибок</h1>
-          <button type="button" class="bank-train" id="start-errors" disabled>
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" aria-hidden="true"><path d="M13 2 4 14h7l-1 8 10-14h-7l0-6z"/></svg>
-            Тренировка
-          </button>
+          <div class="bank-head-actions">
+            <button type="button" class="bank-map" id="open-graph">Карта</button>
+            <button type="button" class="bank-train" id="start-errors" disabled>
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" aria-hidden="true"><path d="M13 2 4 14h7l-1 8 10-14h-7l0-6z"/></svg>
+              Тренировка
+            </button>
+          </div>
         </div>
         <div class="bank-counts">
           <article class="bank-count new"><strong id="bank-new">0</strong><span>Новые</span></article>
@@ -276,9 +280,34 @@
         <p class="status" id="error-status"></p>
       </section>
 
+      <section data-screen="skills-graph" class="graph-screen" hidden>
+        <canvas id="graph-canvas" aria-label="Карта приёмов"></canvas>
+        <div class="graph-top">
+          <button type="button" class="graph-back" id="graph-back" aria-label="Назад">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M15 18l-6-6 6-6"/></svg>
+          </button>
+          <div class="graph-top-copy">
+            <div class="graph-kicker">Карта приёмов</div>
+            <p class="graph-hint" id="graph-hint">Тапни приём, чтобы повторить</p>
+          </div>
+          <button type="button" class="graph-due" id="graph-due" disabled>Повторить сегодня</button>
+        </div>
+        <div class="graph-empty" id="graph-empty" hidden>
+          <p>Пока карта пустая. Сфоткай задачу в чате или пройди квиз.</p>
+          <button type="button" class="graph-empty-back" id="graph-empty-back">Назад</button>
+        </div>
+        <div class="graph-sheet" id="graph-sheet" hidden>
+          <div class="graph-sheet-kicker" id="graph-sheet-subject"></div>
+          <h2 id="graph-sheet-title">Приём</h2>
+          <p class="graph-sheet-status" id="graph-sheet-status"></p>
+          <button type="button" class="graph-sheet-go" id="graph-sheet-go">Повторить</button>
+        </div>
+        <p class="graph-status" id="graph-status" hidden></p>
+      </section>
+
       <section data-screen="quiz-loading" hidden>
         <div class="prompt loading-card">
-          <img class="mascot pulse" src="/assets/lumi-mark.png" alt="">
+          <img class="mascot pulse" src="/static/lumi-think.png" alt="">
           <p class="loading-title">Собираю квиз</p>
           <p class="loading-tip" id="loading-tip">Обычно это занимает до минуты — не закрывай экран.</p>
         </div>
@@ -372,6 +401,19 @@
     </div>
   </div>
   <div id="toast" class="toast" role="status" hidden></div>
+  <div id="tour" class="tour" hidden>
+    <div id="tour-hole" class="tour-hole"></div>
+    <div class="tour-card" id="tour-card" role="dialog" aria-modal="true" aria-labelledby="tour-text">
+      <p class="tour-step" id="tour-step">1 из 7</p>
+      <p id="tour-text"></p>
+      <div class="tour-actions">
+        <button type="button" class="tour-skip" id="tour-skip">Пропустить</button>
+        <span class="tour-spacer"></span>
+        <button type="button" class="tour-back" id="tour-back" hidden>Назад</button>
+        <button type="button" class="tour-next" id="tour-next">Дальше</button>
+      </div>
+    </div>
+  </div>
   <script src="https://st.max.ru/js/max-web-app.js"></script>
   <script src="/static/cabinet.js"></script>
 </body>

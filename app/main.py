@@ -12,6 +12,7 @@ from app.bot.handlers import BotApp
 from app.bot.keyboards import reminder_keyboard
 from app.config import get_settings, webhook_path
 from app.db import Database
+from app.services.demo import ensure_demo
 from app.services.reminders import in_quiet_hours, moscow_now, reminder_text
 from app.services.tutor import Tutor
 from app.textutil import esc
@@ -151,6 +152,10 @@ async def amain() -> None:
         log.info("Доступ ограничен, пользователей: %s", len(allowed))
     db = Database(settings.database_path)
     await db.connect()
+    try:
+        await ensure_demo(db)
+    except Exception:
+        log.exception("Не удалось заполнить демо-кабинет")
     proxy_url = settings.gemini_proxy_url()
     if settings.proxy_host.strip():
         log.info("Gemini через SOCKS5 %s:%s", settings.proxy_host.strip(), settings.proxy_port)
