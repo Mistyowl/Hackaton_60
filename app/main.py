@@ -165,11 +165,13 @@ async def amain() -> None:
         settings.gemini_model,
         proxy_url,
         fallback_model=settings.gemini_fallback_model,
+        quiz_model=settings.gemini_quiz_model,
     )
     if tutor.fallback_models:
         log.info(
-            "Gemini: основная %s, запасные %s",
+            "Gemini: основная %s, квиз %s, запасные %s",
             settings.gemini_model,
+            tutor.quiz_model or settings.gemini_model,
             ", ".join(tutor.fallback_models),
         )
 

@@ -41,7 +41,7 @@ async def start_topic_quiz(db: Database, tutor: Tutor, user_id: int, topic: str,
 
 
 async def start_note_quiz(db: Database, tutor: Tutor, user_id: int, note: dict, wanted: int = 6) -> int:
-    body = (note.get("body") or "")[:4000]
+    body = (note.get("body") or "")[:1500]
     title = (note.get("title") or "Конспект")[:80]
     prompt = f"{title}\nКонспект:\n{body}" if body else title
     quiz_title, drafts = await tutor.make_quiz(

@@ -11,6 +11,10 @@
 [![Deploy](https://img.shields.io/badge/Deploy-Docker-4C3F91?style=flat-square&logo=docker&logoColor=white&labelColor=1F2937)](https://www.docker.com/)
 [![License](https://img.shields.io/badge/License-MIT-4C3F91?style=flat-square&labelColor=1F2937)](LICENSE)
 
+<br>
+
+**Бот:** [max.ru/ideya_fiks_60_bot](https://max.ru/ideya_fiks_60_bot) · **Демо:** [lumi.it-cube32.ru/demo](https://lumi.it-cube32.ru/demo)
+
 </div>
 
 ---

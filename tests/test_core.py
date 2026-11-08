@@ -57,6 +57,8 @@ from app.services.quiz import (
     start_topic_quiz,
 )
 from app.services.tutor import (
+    QUIZ_ATTEMPT_TIMEOUT,
+    QUIZ_FAST_MODEL,
     QUIZ_OUTPUT_TOKENS,
     QUOTA_MESSAGE,
     RETRY_CAP_SECONDS,
@@ -486,9 +488,12 @@ class TutorGeminiTests(unittest.IsolatedAsyncioTestCase):
     async def test_make_quiz_asks_with_larger_token_budget(self) -> None:
         seen: dict = {}
 
-        async def fake_ask(system, contents, schema, temperature, max_output_tokens=2048):
+        async def fake_ask(system, contents, schema, temperature, max_output_tokens=2048, **kwargs):
             seen["max_output_tokens"] = max_output_tokens
             seen["schema"] = schema
+            seen["models"] = kwargs.get("models")
+            seen["attempt_timeout"] = kwargs.get("attempt_timeout")
+            seen["max_attempts"] = kwargs.get("max_attempts")
             return _QuizSchema(
                 title="Тема",
                 questions=[
@@ -509,6 +514,39 @@ class TutorGeminiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(drafts), 5)
         self.assertEqual(seen["max_output_tokens"], QUIZ_OUTPUT_TOKENS)
         self.assertIs(seen["schema"], _QuizSchema)
+        self.assertEqual(seen["models"][0], QUIZ_FAST_MODEL)
+        self.assertEqual(seen["attempt_timeout"], QUIZ_ATTEMPT_TIMEOUT)
+        self.assertEqual(seen["max_attempts"], 1)
+
+    async def test_quiz_timeout_switches_to_next_model(self) -> None:
+        def behavior(config, model):
+            if model == QUIZ_FAST_MODEL:
+                raise TimeoutError("timeout after 24s")
+            return _FakeResponse(
+                _QuizSchema(
+                    title="Быстрый",
+                    questions=[
+                        _QuestionSchema(
+                            prompt=f"Вопрос {index}",
+                            options=["1", "2", "3", "4"],
+                            correct_index=0,
+                            explanation="так",
+                        )
+                        for index in range(4)
+                    ],
+                )
+            )
+
+        tutor = Tutor("test-key", "gemma-4-31b-it", fallback_model="gemini-3.8-flash")
+        models = _FakeModels(behavior)
+        tutor._client = _FakeClient(models)
+        tutor._thinking_ok[QUIZ_FAST_MODEL] = False
+        tutor._thinking_ok["gemma-4-31b-it"] = False
+        title, drafts = await tutor.make_quiz(topic="дроби", errors=None, wanted=4)
+        self.assertEqual(title, "Быстрый")
+        self.assertEqual(len(drafts), 4)
+        self.assertEqual(models.models[0], QUIZ_FAST_MODEL)
+        self.assertEqual(tutor.last_model, "gemma-4-31b-it")
 
 
 class FakeTutor:

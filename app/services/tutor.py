@@ -18,6 +18,8 @@ PROMPTS = Path(__file__).resolve().parent.parent / "prompts"
 REPLY_LIMIT = 1200
 SOLUTION_LIMIT = 1500
 QUIZ_OUTPUT_TOKENS = 4096
+QUIZ_FAST_MODEL = "gemini-3.5-flash-lite"
+QUIZ_ATTEMPT_TIMEOUT = 24.0
 QUOTA_MESSAGE = "Сейчас много запросов к модели. Подожди минуту и попробуй снова."
 RETRY_CAP_SECONDS = 30.0
 SERVICE_BACKOFF_SECONDS = 1.5
@@ -281,8 +283,11 @@ class Tutor:
         model: str,
         proxy_url: str = "",
         fallback_model: str = "",
+        quiz_model: str = QUIZ_FAST_MODEL,
     ) -> None:
         self.model = model
+        self.quiz_model = (quiz_model or "").strip()
+        self.last_model = ""
         self.fallback_models = _fallback_models(fallback_model, model)
         self.enabled = bool(api_key.strip())
         # По модели: None — ещё не пробовали; False — не принимает ThinkingConfig.
@@ -303,6 +308,13 @@ class Tutor:
 
     def _models(self) -> list[str]:
         return [self.model, *self.fallback_models]
+
+    def _quiz_models(self) -> list[str]:
+        names: list[str] = []
+        for name in (self.quiz_model, *self._models()):
+            if name and name not in names:
+                names.append(name)
+        return names
 
     def _require(self) -> genai.Client:
         if self._client is None:
@@ -337,6 +349,7 @@ class Tutor:
         temperature: float,
         max_output_tokens: int = 2048,
         model: str | None = None,
+        timeout: float | None = None,
     ):
         model_name = model or self.model
         client = self._require()
@@ -374,10 +387,12 @@ class Tutor:
         last_error: Exception | None = None
         for index, config in enumerate(configs):
             try:
-                response = await client.aio.models.generate_content(
-                    model=model_name,
-                    contents=request_contents,
-                    config=config,
+                response = await self._generate_once(
+                    client,
+                    model_name,
+                    request_contents,
+                    config,
+                    timeout,
                 )
                 if index == 0 and thinking_state is None and len(configs) > 1:
                     self._thinking_ok[model_name] = True
@@ -393,6 +408,19 @@ class Tutor:
                     continue
                 raise
         raise TutorError("Модель не ответила. Попробуй ещё раз.") from last_error
+
+    async def _generate_once(self, client, model_name: str, contents, config, timeout: float | None):
+        call = client.aio.models.generate_content(
+            model=model_name,
+            contents=contents,
+            config=config,
+        )
+        if timeout is None:
+            return await call
+        try:
+            return await asyncio.wait_for(call, timeout)
+        except TimeoutError as error:
+            raise TimeoutError(f"timeout after {timeout:.0f}s") from error
 
     def _parse(self, response, schema: type[BaseModel]):
         parsed = getattr(response, "parsed", None)
@@ -424,10 +452,14 @@ class Tutor:
         temperature: float,
         max_output_tokens: int,
         wait_on_quota: bool,
+        timeout: float | None = None,
+        max_attempts: int | None = None,
     ):
         last_error: Exception | None = None
-        # На последней модели даём больше попыток — запасных уже нет.
-        attempts = 3 if wait_on_quota else 1
+        if max_attempts is not None:
+            attempts = max_attempts
+        else:
+            attempts = 3 if wait_on_quota else 1
         for attempt in range(attempts):
             try:
                 response = await self._generate(
@@ -437,6 +469,7 @@ class Tutor:
                     temperature,
                     max_output_tokens,
                     model=model_name,
+                    timeout=timeout,
                 )
                 return self._parse(response, schema)
             except TutorError as error:
@@ -488,13 +521,17 @@ class Tutor:
         schema: type[BaseModel],
         temperature: float,
         max_output_tokens: int = 2048,
+        models: list[str] | None = None,
+        attempt_timeout: float | None = None,
+        max_attempts: int | None = None,
     ):
-        models = self._models()
+        models = models or self._models()
+        self.last_model = ""
         last_error: Exception | None = None
         for index, model_name in enumerate(models):
             has_next = index + 1 < len(models)
             try:
-                return await self._ask_model(
+                parsed = await self._ask_model(
                     model_name,
                     system,
                     contents,
@@ -502,7 +539,11 @@ class Tutor:
                     temperature,
                     max_output_tokens,
                     wait_on_quota=not has_next,
+                    timeout=attempt_timeout,
+                    max_attempts=max_attempts,
                 )
+                self.last_model = model_name
+                return parsed
             except TutorError as error:
                 if "GEMINI_API_KEY" in error.user_message:
                     raise
@@ -664,6 +705,9 @@ class Tutor:
                 _QuizSchema,
                 0.4,
                 max_output_tokens=QUIZ_OUTPUT_TOKENS,
+                models=self._quiz_models(),
+                attempt_timeout=QUIZ_ATTEMPT_TIMEOUT,
+                max_attempts=1,
             )
             quiz_title, drafts = normalize_quiz(data, title[:120], wanted)
         except TutorError as error:
@@ -671,9 +715,10 @@ class Tutor:
                 raise
             raise TutorError("Не получилось собрать квиз. Назови тему ещё раз.") from error
         log.info(
-            "quiz generated in %.1fs, questions=%s",
+            "quiz generated in %.1fs, questions=%s, model=%s",
             time.monotonic() - started,
             len(drafts),
+            self.last_model,
         )
         return quiz_title, drafts
 

@@ -76,6 +76,8 @@ class Settings(BaseSettings):
     gemini_model: str = "gemini-2.5-flash"
     # Запасные модели через запятую, если основная отвечает 429/503.
     gemini_fallback_model: str = "gemini-3.8-flash,gemma-4-31b-it"
+    # Квиз собирается этой моделью первой: она отвечает за несколько секунд.
+    gemini_quiz_model: str = "gemini-3.5-flash-lite"
     database_path: str = "data/tutor.db"
     web_host: str = "127.0.0.1"
     web_port: int = 8000
