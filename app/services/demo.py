@@ -426,6 +426,8 @@ def _stamp(day: date) -> str:
 
 def _quiz_dates(today: date) -> list[date]:
     week_start = today - timedelta(days=today.weekday())
+    if today.weekday() == 6:
+        week_start += timedelta(days=1)
     days = [week_start + timedelta(days=offset) for offset in range((today - week_start).days + 1)]
     return [days[-(index % len(days))] for index in range(len(_QUIZZES))]
 

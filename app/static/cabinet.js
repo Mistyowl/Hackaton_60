@@ -14,6 +14,7 @@ const MARK = '<span class="mark"><svg width="12" height="12" viewBox="0 0 24 24"
 const CHECK_MINI = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M5 12l5 5L20 7"/></svg>';
 const CROSS_MINI = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M6 6l12 12"/><path d="M18 6L6 18"/></svg>';
 const SWIPE_REVEAL = 118;
+const DEMO_TOUR_KEY = "lumi-demo-tour";
 
 const gate = document.querySelector("#gate");
 const cabinet = document.querySelector("#cabinet");
@@ -1906,7 +1907,11 @@ async function loadCabinet() {
   paintTopics();
   showCabinet();
   showScreen("home");
-  if (!state.profile.cabinet_tour) startTour();
+  if (isDemo()) {
+    if (!demoTourSeen()) startTour();
+  } else if (!state.profile.cabinet_tour) {
+    startTour();
+  }
 }
 
 function setSwipeOpen(row, side) {
@@ -2713,6 +2718,7 @@ function finishTour() {
   document.querySelector("#tour").hidden = true;
   document.body.classList.remove("tour-open");
   if (state.screen !== "home") showScreen("home");
+  if (isDemo()) rememberDemoTour();
   fetch("/api/tour", { method: "POST" })
     .then((response) => {
       if (response.ok) state.profile.cabinet_tour = true;
@@ -2773,6 +2779,20 @@ async function ensureFreshBuild() {
 
 function isDemo() {
   return Boolean(document.querySelector('meta[name="lumi-demo"]'));
+}
+
+function demoTourSeen() {
+  try {
+    return localStorage.getItem(DEMO_TOUR_KEY) === "1";
+  } catch (error) {
+    return false;
+  }
+}
+
+function rememberDemoTour() {
+  try {
+    localStorage.setItem(DEMO_TOUR_KEY, "1");
+  } catch (error) {}
 }
 
 async function enter() {

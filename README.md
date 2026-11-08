@@ -10,6 +10,7 @@
 [![Database](https://img.shields.io/badge/Database-SQLite_FTS5-4C3F91?style=flat-square&logo=sqlite&logoColor=white&labelColor=1F2937)](https://www.sqlite.org/fts5.html)
 [![Deploy](https://img.shields.io/badge/Deploy-Docker-4C3F91?style=flat-square&logo=docker&logoColor=white&labelColor=1F2937)](https://www.docker.com/)
 [![License](https://img.shields.io/badge/License-MIT-4C3F91?style=flat-square&labelColor=1F2937)](LICENSE)
+[![Check](https://img.shields.io/github/actions/workflow/status/Mistyowl/Hackaton_60/check.yml?style=flat-square&label=Check&labelColor=1F2937&color=4C3F91)](https://github.com/Mistyowl/Hackaton_60/actions/workflows/check.yml)
 
 <br>
 

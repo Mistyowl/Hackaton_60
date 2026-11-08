@@ -186,7 +186,6 @@ def create_app(
     @app.post("/api/demo/session")
     async def demo_session() -> JSONResponse:
         await ensure_demo(db)
-        # Общая учётка: каждое открытие /demo снова показывает тур.
         await db.clear_cabinet_tour(DEMO_USER_ID)
         session = await db.create_cabinet_session(DEMO_USER_ID)
         return _attach_session(JSONResponse({"ok": True}), session)
